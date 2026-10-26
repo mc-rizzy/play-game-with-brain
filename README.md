@@ -4,5 +4,5 @@ Using an EEG and AI model, brain waves can be interpreted to control a video gam
 
 
 
-$Hackathon Submisison to Global Meta Hackathon 2026:
+# Hackathon Submisison to Global Meta Hackathon 2026:
 Team name: Team 01f-w8c9spo
