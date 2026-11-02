@@ -1,0 +1,5 @@
+{
+    "python.analysis.extraPaths": [
+        "./BrainAccessSDK-linux/python_api"
+    ]
+}
