@@ -1,7 +1,7 @@
 """Headless pygame smoke test: boot the game and run frames.
 
 Requires pygame (game/requirements.txt). Skips cleanly when missing.
-Run:  .venv/bin/python -m unittest discover -s tests
+Run:  .venv/Scripts/python -m unittest discover -s tests   (Windows)
 """
 import os
 import unittest

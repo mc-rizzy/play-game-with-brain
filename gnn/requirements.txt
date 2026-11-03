@@ -1,0 +1,10 @@
+# EEG pipeline deps (training, replay, visualizer, bridge).
+# Install (Windows): .venv\Scripts\pip install -r gnn/requirements.txt
+# Without an NVIDIA GPU, install the small CPU-only torch first:
+#   .venv\Scripts\pip install --index-url https://download.pytorch.org/whl/cpu torch
+numpy>=1.24
+scipy>=1.11
+torch>=2.2
+# Live headset streaming additionally needs (Windows):
+#   mne, and the BrainAccess Windows SDK (python_api) installed, e.g.
+#   pip install mne && pip install <path-to>/BrainAccessSDK/python_api
