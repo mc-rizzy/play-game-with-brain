@@ -3,26 +3,18 @@ import random
 
 import pygame
 
-from config import (
-    TILE,
-    WORLD_W,
-    WORLD_H,
-    DAY_LENGTH,
-    GRAVITY,
-    REACH,
-    WINDOWED_SIZE,
-    PLAYER_SPEED,
-    PLAYER_SWIM_SPEED,
-    PLAYER_JUMP,
-    MAX_PARTICLES,
+from game.config import (
+    TILE, WORLD_W, WORLD_H, DAY_LENGTH, GRAVITY, REACH,
+    WINDOWED_SIZE, PLAYER_SPEED, PLAYER_SWIM_SPEED, PLAYER_JUMP,
+    MAX_PARTICLES, UI_BASE_W, UI_BASE_H, UI_MIN_SCALE, UI_MAX_SCALE,
 )
-from tiles import *
-from sprites import make_sprites
-from world import World
-from lighting import Lighting
-from entities import Player, Enemy, move_collide
-from utils import lerp_col, sky_and_daylight
-from sprites import make_sprites, make_water_frames
+from game.tiles import *
+from game.sprites import make_sprites, make_water_frames, make_entity_sprites
+from game.world import World
+from game.lighting import Lighting
+from game.entities import Player, Enemy, move_collide
+from game.utils import lerp_col, sky_and_daylight
+from game import ai_control
 
 
 class Game:
@@ -35,22 +27,28 @@ class Game:
         self.W, self.H = self.screen.get_size()
 
         self.clock = pygame.time.Clock()
-        self.font = pygame.font.SysFont("consolas", 17)
-        self.big = pygame.font.SysFont("consolas", 26, bold=True)
+        self.ui_scale = 1.0
+        self.font = None
+        self.big = None
+        self.refresh_ui_scale()
 
         self.sprites = make_sprites()
-        self.icons = {
-            item: pygame.transform.scale(self.sprites[item][0], (38, 38))
-            for item in HOTBAR
-            if item != SWORD
-        }
+        self.entity = make_entity_sprites()
+        self.icons = {}
+        self.refresh_icons()
 
         self.world = World()
         self.light = Lighting(self.world)
         self.light.compute(1.0)
+        self.light.update_display(10.0)
 
         self.water_frames = make_water_frames()
         self.visible = (0, 0, 0, 0)
+        self._text_cache = {}
+        self._swing_cache = None
+        self._heart_cache = {}
+        self._prev_ai_buttons = {"attack": False, "place": False,
+                                 "torch": False, "craft": False}
 
         spawn_x = WORLD_W // 2
         self.spawn = (
@@ -117,6 +115,7 @@ class Game:
         self.sky_key = None
         self.light_tile_surface = None
         self.light_screen_surface = None
+        self._light_cache_key = None
 
     # ------------------------------------------------------------ display
 
@@ -136,6 +135,51 @@ class Game:
         self.sky_surface = None
         self.light_tile_surface = None
         self.light_screen_surface = None
+        self._light_cache_key = None
+        self.refresh_ui_scale()
+        self.refresh_icons()
+
+    def refresh_ui_scale(self):
+        """Scale all GUI elements from the window size (1.0 at 1280x720)."""
+        scale = min(self.W / UI_BASE_W, self.H / UI_BASE_H)
+        self.ui_scale = max(UI_MIN_SCALE, min(UI_MAX_SCALE, scale))
+        s = self.ui_scale
+        self.font = pygame.font.SysFont("consolas", max(17, int(17 * s)))
+        self.big = pygame.font.SysFont("consolas", max(26, int(26 * s)),
+                                       bold=True)
+        self._text_cache = {}
+        self._heart_cache = {}
+        # Scaled hotbar metrics.
+        self.slot_size = int(54 * s)
+        self.slot_inner = int(50 * s)
+        self.icon_size = int(38 * s)
+        heart_w = max(20, int(20 * s))
+        self.heart_size = (heart_w, max(18, int(heart_w * 0.9)))
+
+    def refresh_icons(self):
+        if not hasattr(self, "icon_size"):
+            return
+        size = self.icon_size
+        self.icons = {
+            item: pygame.transform.scale(self.sprites[item][0], (size, size))
+            for item in HOTBAR
+            if item != SWORD
+        }
+        sword = self.entity.get("sword")
+        if sword is not None:
+            self.icons[SWORD] = pygame.transform.scale(sword, (size, size))
+
+    def text(self, content, colour, big=False):
+        """Cached font rendering (avoids re-rendering every frame)."""
+        key = (content, colour, big)
+        cached = self._text_cache.get(key)
+        if cached is None:
+            font = self.big if big else self.font
+            cached = font.render(content, True, colour)
+            if len(self._text_cache) > 256:
+                self._text_cache.clear()
+            self._text_cache[key] = cached
+        return cached
 
     # ------------------------------------------------------------ helpers
 
@@ -218,36 +262,48 @@ class Game:
         # Lighting internally ignores calls unless sunlight changed
         # by one full light level or a block changed.
         self.light.compute(self.daylight)
+        self.light.update_display(dt)
 
         keys = pygame.key.get_pressed()
+
+        # Keyboard + AI merge so both work simultaneously.
+        kb_move = (
+            (keys[pygame.K_d] or keys[pygame.K_RIGHT])
+            - (keys[pygame.K_a] or keys[pygame.K_LEFT])
+        )
+        kb_jump = bool(keys[pygame.K_SPACE] or keys[pygame.K_w])
+        try:
+            ai = ai_control.poll_ai_action()
+        except Exception:
+            ai = {"move": 0.0, "jump": False, "attack": False,
+                  "place": False, "torch": False, "craft": False,
+                  "slot": None}
+        merged = ai_control.merge_with_keyboard(
+            {"move": kb_move, "jump": kb_jump}, ai)
+        move = merged["move"]
+        jump = merged["jump"]
+        self._ai_discrete(ai)
 
         player_tile_x = player.rect.centerx // TILE
         player_tile_y = player.rect.centery // TILE
         in_water = world.get(player_tile_x, player_tile_y) == WATER
-
-        move = (
-            (keys[pygame.K_d] or keys[pygame.K_RIGHT])
-            - (keys[pygame.K_a] or keys[pygame.K_LEFT])
-        )
 
         player.vel.x = move * (
             PLAYER_SWIM_SPEED if in_water else PLAYER_SPEED
         )
 
         if move:
-            player.face = move
+            player.face = 1 if move > 0 else -1
             player.walk += dt * 9
 
         if in_water:
-            if keys[pygame.K_SPACE] or keys[pygame.K_w]:
+            if jump:
                 player.vel.y = -240
             player.vel.y += GRAVITY * 0.22 * dt
             player.vel.y = min(player.vel.y, 145)
         else:
             player.vel.y += GRAVITY * dt
-            if (
-                keys[pygame.K_SPACE] or keys[pygame.K_w]
-            ) and player.on_ground:
+            if jump and player.on_ground:
                 player.vel.y = PLAYER_JUMP
 
         player.on_ground = move_collide(world, player.rect, player.vel, dt)
@@ -286,6 +342,33 @@ class Game:
         self.cam += (target - self.cam) * min(1.0, dt * 6)
         self.cam.x = max(0, min(WORLD_W * TILE - self.W, self.cam.x))
         self.cam.y = max(0, min(WORLD_H * TILE - self.H, self.cam.y))
+
+    def _ai_discrete(self, ai):
+        """Edge-triggered AI buttons (attack/place/torch/craft/slot)."""
+        prev = self._prev_ai_buttons
+        if ai.get("attack") and not prev["attack"]:
+            self.attack()
+        if ai.get("place") and not prev["place"]:
+            self.place_selected_block()
+        if ai.get("torch") and not prev["torch"]:
+            self.quick_torch()
+        if ai.get("craft") and not prev["craft"]:
+            self.craft_open = not self.craft_open
+        slot = ai.get("slot")
+        if isinstance(slot, int) and 0 <= slot < len(HOTBAR):
+            self.slot = slot
+        for key in prev:
+            prev[key] = bool(ai.get(key))
+
+    def quick_torch(self):
+        tile_x, tile_y = self.mouse_tile()
+        if (
+            self.inv.get(TORCH, 0) > 0
+            and self.world.get(tile_x, tile_y) == AIR
+        ):
+            self.world.set(tile_x, tile_y, TORCH)
+            self.inv[TORCH] -= 1
+            self.invalidate_light()
 
     def update_mining(self, dt):
         if self.craft_open or not pygame.mouse.get_pressed()[0]:
@@ -406,6 +489,10 @@ class Game:
 
     def get_sky_surface(self):
         top, bottom, _ = sky_and_daylight(self.tod)
+        # Quantize so the gradient rebuilds a few times per minute,
+        # not every frame, as tod interpolates continuously.
+        top = tuple((c // 8) * 8 for c in top)
+        bottom = tuple((c // 8) * 8 for c in bottom)
         key = (top, bottom, self.W, self.H)
 
         if self.sky_surface is not None and self.sky_key == key:
@@ -418,6 +505,10 @@ class Game:
             colour = lerp_col(top, bottom, y / max(1, self.H))
             surface.fill(colour, (0, y, self.W, strip_height))
 
+        try:
+            surface = surface.convert()
+        except pygame.error:
+            pass
         self.sky_surface = surface
         self.sky_key = key
         return surface
@@ -443,39 +534,33 @@ class Game:
 
         world = self.world
         sprites = self.sprites
+        screen = self.screen
+        camx, camy = self.cam.x, self.cam.y
+        self.visible = (x0, y0, x1, y1)
+        soil_back = (48, 40, 48)
+        air_gadgets = (TORCH, LANTERN, FLOWER, TALLGRASS)
 
         for ty in range(y0, y1):
+            row_y = ty * TILE - camy
             for tx in range(x0, x1):
                 tile = world.g[tx][ty]
-                sx = int(tx * TILE - self.cam.x)
-                sy = int(ty * TILE - self.cam.y)
+                sx = int(tx * TILE - camx)
+                sy = int(row_y)
 
                 underground = ty > world.surface[tx]
 
                 if tile == AIR:
                     if underground:
-                        self.screen.fill(
-                            (48, 40, 48), (sx, sy, TILE, TILE)
-                        )
+                        screen.fill(soil_back, (sx, sy, TILE, TILE))
                     continue
 
-                self.visible = (x0, y0, x1, y1)
-                # inside the tile loop:
                 if tile == WATER:
                     continue   # drawn later, over entities
 
-                if underground and tile in (
-                    TORCH,
-                    LANTERN,
-                    FLOWER,
-                    TALLGRASS,
-                ):
-                    self.screen.fill(
-                        (48, 40, 48), (sx, sy, TILE, TILE)
-                    )
+                if underground and tile in air_gadgets:
+                    screen.fill(soil_back, (sx, sy, TILE, TILE))
 
-                sprite = sprites[tile][(tx + ty) & 1]
-                self.screen.blit(sprite, (sx, sy))
+                screen.blit(sprites[tile][(tx + ty) & 1], (sx, sy))
 
         self.draw_mining_cracks()
         self.draw_lighting(x0, y0, x1, y1)
@@ -573,49 +658,58 @@ class Game:
 
         if (
             self.light_tile_surface is None
-            or self.light_tile_surface.get_size() != (width, height)
+            or self.light_tile_surface.get_size() != (width + 2, height + 2)
         ):
-            self.light_tile_surface = pygame.Surface((width, height))
+            # +2 border so the smooth upscale can bleed one tile past
+            # the visible edges without dark seams.
+            self.light_tile_surface = pygame.Surface((width + 2, height + 2))
             self.light_screen_surface = pygame.Surface(
-                (width * TILE, height * TILE)
+                ((width + 2) * TILE, (height + 2) * TILE))
+            self._light_cache_key = None
+
+        # Rebuild the overlay only when the light changed or we scrolled
+        # to new tiles; camera sub-tile movement just shifts the blit.
+        cache_key = (x0, y0, width, height, self.light.version,
+                     self.light.display_version)
+        if cache_key != self._light_cache_key:
+            pixels = pygame.PixelArray(self.light_tile_surface)
+
+            light_r = self.light.dr
+            light_g = self.light.dg
+            light_b = self.light.db
+
+            # Minimum values prevent pure black; the smooth upscale
+            # blends tile-to-tile instead of hard stepping.
+            for local_y in range(height + 2):
+                world_y = min(WORLD_H - 1, max(0, y0 + local_y - 1))
+                row_offset = world_y * WORLD_W
+
+                for local_x in range(width + 2):
+                    world_x = min(WORLD_W - 1, max(0, x0 + local_x - 1))
+                    i = row_offset + world_x
+
+                    pixels[local_x, local_y] = (
+                        18 + (light_r[i] * 237) // 255,
+                        18 + (light_g[i] * 237) // 255,
+                        22 + (light_b[i] * 233) // 255,
+                    )
+
+            del pixels
+
+            # Smooth (bilinear) upscale: soft gradients between tiles
+            # while the underlying data stays tile-based.
+            pygame.transform.smoothscale(
+                self.light_tile_surface,
+                self.light_screen_surface.get_size(),
+                self.light_screen_surface,
             )
-
-        pixels = pygame.PixelArray(self.light_tile_surface)
-
-        light_r = self.light.r
-        light_g = self.light.g
-        light_b = self.light.b
-
-        # Minimum values prevent the game becoming pure black while
-        # still preserving strong tile-to-tile contrast.
-        for local_y in range(height):
-            world_y = y0 + local_y
-            row_offset = world_y * WORLD_W
-
-            for local_x in range(width):
-                i = row_offset + x0 + local_x
-
-                pixels[local_x, local_y] = (
-                    18 + (light_r[i] * 237) // 255,
-                    18 + (light_g[i] * 237) // 255,
-                    22 + (light_b[i] * 233) // 255,
-                )
-
-        del pixels
-
-        # Nearest-neighbour scaling: every light pixel becomes exactly
-        # one complete game tile. No smooth edges between tiles.
-        pygame.transform.scale(
-            self.light_tile_surface,
-            self.light_screen_surface.get_size(),
-            self.light_screen_surface,
-        )
+            self._light_cache_key = cache_key
 
         self.screen.blit(
             self.light_screen_surface,
             (
-                int(x0 * TILE - self.cam.x),
-                int(y0 * TILE - self.cam.y),
+                int((x0 - 1) * TILE - self.cam.x),
+                int((y0 - 1) * TILE - self.cam.y),
             ),
             special_flags=pygame.BLEND_RGBA_MULT,
         )
@@ -638,78 +732,94 @@ class Game:
 
     def draw_entities(self):
         p = self.player
+        screen = self.screen
+        camx, camy = self.cam.x, self.cam.y
+        ent = self.entity
+        now = pygame.time.get_ticks()
 
         for e in self.enemies:
-            x, y, w, h = (int(e.rect.x - self.cam.x), int(e.rect.y - self.cam.y),
-                        e.rect.width, e.rect.height)
-            flash = e.hurt_t > 0
-
-            if e.kind == "slime":
-                body = (255, 125, 125) if flash else (92, 210, 104)
-                pygame.draw.rect(self.screen, body, (x, y + h // 3, w, h - h // 3))
-                pygame.draw.rect(self.screen, body, (x + w // 6, y + h // 8, w * 2 // 3, h // 3))
-                eye = max(4, TILE // 16)
-                pygame.draw.rect(self.screen, (24, 52, 30), (x + w // 4, y + h // 2, eye, eye))
-                pygame.draw.rect(self.screen, (24, 52, 30), (x + w * 2 // 3, y + h // 2, eye, eye))
-            else:
-                body = (255, 130, 130) if flash else (100, 112, 140)
-                pygame.draw.rect(self.screen, body, (x + w // 5, y, w * 3 // 5, h // 2))
-                pygame.draw.rect(self.screen, (66, 84, 76), (x + w // 8, y + h // 2, w * 3 // 4, h // 2))
-                eye = max(4, TILE // 16)
-                pygame.draw.rect(self.screen, (255, 66, 66), (x + w // 3, y + h // 5, eye, eye))
-                pygame.draw.rect(self.screen, (255, 66, 66), (x + w * 3 // 5, y + h // 5, eye, eye))
+            x = int(e.rect.x - camx)
+            y = int(e.rect.y - camy)
+            w = e.rect.width
+            frame = ((now // 350) + (x // 97)) % 2
+            base = "slime" if e.kind == "slime" else "shade"
+            key = f"{base}_{frame}"
+            if e.hurt_t > 0:
+                key += "_flash"
+            img = ent.get(key)
+            if img is not None:
+                screen.blit(img, (x + (w - img.get_width()) // 2,
+                                  y + e.rect.height - img.get_height()))
+            else:  # placeholder fallback (assets missing)
+                screen.fill((200, 80, 200), (x, y, w, e.rect.height))
 
             bar = max(4, TILE // 16)
-            pygame.draw.rect(self.screen, (58, 20, 20), (x, y - bar - 3, w, bar))
-            pygame.draw.rect(self.screen, (235, 80, 80),
-                            (x, y - bar - 3, int(w * max(0, e.hp) / e.max_hp), bar))
+            screen.fill((58, 20, 20), (x, y - bar - 3, w, bar))
+            screen.fill((235, 80, 80),
+                        (x, y - bar - 3,
+                         int(w * max(0, e.hp) / e.max_hp), bar))
 
-        # Player: drawn from rect proportions (0.85 × 1.9 blocks)
-        x, y, w, h = (int(p.rect.x - self.cam.x), int(p.rect.y - self.cam.y),
-                    p.rect.width, p.rect.height)
-        hurt = p.hurt_t > 0 and int(p.hurt_t * 20) % 2 == 0
-        skin = (255, 165, 165) if hurt else (243, 192, 145)
-        leg = int(math.sin(p.walk) * TILE * 0.06) if abs(p.vel.x) > 5 and p.on_ground else 0
-        head_h, body_y = int(h * 0.36), int(h * 0.36)
-
-        pygame.draw.rect(self.screen, (70, 92, 148),  (x + w // 6, y + h * 2 // 3, w // 4, h // 3 + leg))
-        pygame.draw.rect(self.screen, (70, 92, 148),  (x + w * 3 // 5, y + h * 2 // 3, w // 4, h // 3 - leg))
-        pygame.draw.rect(self.screen, (92, 166, 116), (x + w // 10, body_y, w * 4 // 5, h // 3))
-        pygame.draw.rect(self.screen, skin,           (x + w // 7, y, w * 5 // 7, head_h))
-        pygame.draw.rect(self.screen, (106, 68, 40),  (x + w // 7, y, w * 5 // 7, head_h // 3))
-        eye_x = x + (w * 2 // 3 if p.face > 0 else w // 4)
-        pygame.draw.rect(self.screen, (30, 30, 36), (eye_x, y + head_h // 2, max(4, TILE // 20), max(4, TILE // 20)))
-
-        arm_x = x + (w if p.face > 0 else 0)
-        if p.swing > 0:
-            pygame.draw.line(self.screen, skin, (arm_x, y + h // 2),
-                            (arm_x + p.face * TILE // 3, y + h // 4), max(5, TILE // 12))
-            if HOTBAR[self.slot] == SWORD:
-                pygame.draw.line(self.screen, (222, 228, 238),
-                                (arm_x + p.face * TILE // 3, y + h // 4),
-                                (arm_x + p.face * TILE * 2 // 3, y), max(5, TILE // 12))
+        # Player pixel art: idle / walk frames, flipped by facing.
+        x = int(p.rect.x - camx)
+        y = int(p.rect.y - camy)
+        walking = abs(p.vel.x) > 5 and p.on_ground
+        if walking:
+            key = ("player_walk1" if int(p.walk) % 2 == 0
+                   else "player_walk2")
         else:
-            pygame.draw.line(self.screen, skin, (arm_x, y + h // 2),
-                            (arm_x + p.face * TILE // 10, y + h * 2 // 3), max(5, TILE // 12))
+            key = "player_idle"
+        if p.face < 0:
+            key += "_left"
+        if p.hurt_t > 0 and int(p.hurt_t * 20) % 2 == 0:
+            key += "_flash"
+        img = ent.get(key) or ent.get("player_idle")
+        if img is not None:
+            screen.blit(img, (x, y))
+
+        # Sword swing: pixel-art blade sweeping an arc.
+        if p.swing > 0 and HOTBAR[self.slot] == SWORD:
+            sword = ent.get("sword")
+            if sword is not None:
+                if self._swing_cache is None:
+                    size = max(24, int(TILE * 0.7))
+                    self._swing_cache = pygame.transform.scale(
+                        sword, (size, size))
+                progress = 1.0 - p.swing / 0.22  # 0 -> 1
+                angle = (-70 + 140 * progress) * p.face
+                blade = pygame.transform.rotate(self._swing_cache, angle)
+                hx = x + (p.rect.width if p.face > 0 else 0)
+                screen.blit(blade, (int(hx - blade.get_width() // 2
+                                        + p.face * TILE * 0.25),
+                                    int(y + p.rect.height * 0.15)))
 
         for pt in self.particles:
-            pygame.draw.rect(self.screen, pt[5], (int(pt[0] - self.cam.x), int(pt[1] - self.cam.y), 6, 6))
+            screen.fill(pt[5], (int(pt[0] - camx), int(pt[1] - camy), 6, 6))
         for t in self.texts:
-            self.screen.blit(self.font.render(t[2], True, t[4]),
-                            (int(t[0] - self.cam.x), int(t[1] - self.cam.y)))
+            screen.blit(self.text(t[2], t[4]),
+                        (int(t[0] - camx), int(t[1] - camy)))
 
     # ------------------------------------------------------------ UI
 
+    def heart_icon(self, full):
+        key = ("full" if full else "empty", self.heart_size)
+        cached = self._heart_cache.get(key)
+        if cached is None:
+            src = self.entity.get(
+                "heart_full" if full else "heart_empty")
+            cached = pygame.transform.scale(src, self.heart_size)
+            self._heart_cache[key] = cached
+        return cached
+
     def draw_ui(self):
         player = self.player
+        s = self.ui_scale
+        margin = int(20 * s)
 
+        hw, hh = self.heart_size
+        gap = max(4, int(7 * s))
         for i in range(player.max_hp):
-            colour = (235, 70, 90) if i < player.hp else (68, 54, 64)
-            cx = 26 + i * 27
-            cy = 25
-
-            pygame.draw.rect(self.screen, colour, (cx - 9, cy - 5, 18, 12))
-            pygame.draw.rect(self.screen, colour, (cx - 5, cy + 5, 10, 7))
+            self.screen.blit(self.heart_icon(i < player.hp),
+                             (margin + i * (hw + gap), int(14 * s)))
 
         hours = int(((self.tod - 0.25) % 1.0) * 24)
         minutes = int((self.tod * 1440) % 60)
@@ -720,23 +830,26 @@ class Game:
             f"{hours:02d}:{minutes:02d}"
         )
         self.screen.blit(
-            self.font.render(clock_text, True, (255, 255, 238)),
-            (20, 48),
+            self.text(clock_text, (255, 255, 238)),
+            (margin, int(14 * s) + hh + int(6 * s)),
         )
 
         if self.msg_t > 0:
-            text = self.big.render(self.msg, True, (255, 248, 220))
+            text = self.text(self.msg, (255, 248, 220), big=True)
+            pad_x, pad_y = int(14 * s), int(8 * s)
             box = pygame.Rect(
-                int(self.W / 2 - text.get_width() / 2 - 14),
-                58,
-                text.get_width() + 28,
-                42,
+                int(self.W / 2 - text.get_width() / 2 - pad_x),
+                int(52 * s),
+                text.get_width() + pad_x * 2,
+                text.get_height() + pad_y * 2,
             )
             pygame.draw.rect(
-                self.screen, (18, 22, 36), box, border_radius=8
+                self.screen, (18, 22, 36), box,
+                border_radius=max(4, int(8 * s)),
             )
             self.screen.blit(
-                text, (int(self.W / 2 - text.get_width() / 2), 65)
+                text, (int(self.W / 2 - text.get_width() / 2),
+                       box.y + pad_y),
             )
 
         self.draw_hotbar()
@@ -745,18 +858,23 @@ class Game:
             self.draw_craft()
 
     def draw_hotbar(self):
-        slot_size = 54
+        s = self.ui_scale
+        slot_size = self.slot_size
+        inner = self.slot_inner
         total_width = len(HOTBAR) * slot_size
         start_x = int(self.W / 2 - total_width / 2)
-        y = self.H - 68
+        help_h = self.font.get_height() + int(8 * s)
+        y = self.H - inner - help_h - int(8 * s)
+        pad = (inner - self.icon_size) // 2
 
         for i, item in enumerate(HOTBAR):
             rect = pygame.Rect(
-                start_x + i * slot_size, y, 50, 50
+                start_x + i * slot_size, y, inner, inner
             )
 
             pygame.draw.rect(
-                self.screen, (16, 20, 32), rect, border_radius=5
+                self.screen, (16, 20, 32), rect,
+                border_radius=max(3, int(5 * s)),
             )
             pygame.draw.rect(
                 self.screen,
@@ -764,41 +882,25 @@ class Game:
                 if i == self.slot
                 else (115, 124, 146),
                 rect,
-                3 if i == self.slot else 1,
-                border_radius=5,
+                max(2, int(3 * s)) if i == self.slot else 1,
+                border_radius=max(3, int(5 * s)),
             )
 
-            if item == SWORD:
-                pygame.draw.line(
-                    self.screen,
-                    (226, 231, 240),
-                    (rect.x + 14, rect.y + 37),
-                    (rect.x + 36, rect.y + 13),
-                    6,
-                )
-                pygame.draw.line(
-                    self.screen,
-                    (148, 98, 54),
-                    (rect.x + 11, rect.y + 40),
-                    (rect.x + 20, rect.y + 31),
-                    6,
-                )
-            else:
-                self.screen.blit(self.icons[item], (rect.x + 6, rect.y + 6))
+            icon = self.icons.get(item)
+            if icon is not None:
+                self.screen.blit(icon, (rect.x + pad, rect.y + pad))
 
             count = self.inv.get(item, 0)
             if item != SWORD and count:
-                text = self.font.render(
-                    str(count), True, (255, 255, 255)
-                )
+                text = self.text(str(count), (255, 255, 255))
                 self.screen.blit(
-                    text, (rect.right - 17, rect.bottom - 19)
+                    text, (rect.right - text.get_width() - int(5 * s),
+                           rect.bottom - text.get_height() - int(3 * s)),
                 )
 
-            number = self.font.render(
-                str(i + 1), True, (190, 200, 215)
-            )
-            self.screen.blit(number, (rect.x + 4, rect.y + 3))
+            number = self.text(str(i + 1), (190, 200, 215))
+            self.screen.blit(number, (rect.x + int(4 * s),
+                                      rect.y + int(3 * s)))
 
         tile_x, tile_y = self.mouse_tile()
         hovered = self.world.get(tile_x, tile_y)
@@ -813,32 +915,44 @@ class Game:
             f"{selected}  -  E: Craft  F: Torch  "
             f"F11: Fullscreen  LMB: Mine/Attack  RMB: Place"
         )
+        rendered = self.text(help_text, (228, 234, 244))
         self.screen.blit(
-            self.font.render(help_text, True, (228, 234, 244)),
-            (start_x, self.H - 14),
+            rendered,
+            (int(self.W / 2 - rendered.get_width() / 2),
+             self.H - help_h + int(2 * s)),
         )
 
     def draw_craft(self):
+        s = self.ui_scale
+        row_h = int(44 * s)
+        step = int(52 * s)
+        footer_h = int(34 * s)
+        title_h = int(62 * s)
+        panel_w = min(self.W - int(40 * s), int(560 * s))
+        panel_h = min(self.H - int(40 * s),
+                      title_h + len(RECIPES) * step + footer_h)
         panel = pygame.Rect(
-            int(self.W / 2 - 250),
-            int(self.H / 2 - 200),
-            500,
-            400,
+            int(self.W / 2 - panel_w / 2),
+            int(self.H / 2 - panel_h / 2),
+            panel_w,
+            panel_h,
         )
 
         pygame.draw.rect(
-            self.screen, (22, 26, 42), panel, border_radius=12
+            self.screen, (22, 26, 42), panel,
+            border_radius=max(6, int(12 * s)),
         )
         pygame.draw.rect(
-            self.screen, (255, 210, 130), panel, 2, border_radius=12
+            self.screen, (255, 210, 130), panel, max(2, int(2 * s)),
+            border_radius=max(6, int(12 * s)),
         )
         self.screen.blit(
-            self.big.render("Crafting", True, (255, 225, 160)),
-            (panel.x + 24, panel.y + 18),
+            self.text("Crafting", (255, 225, 160), big=True),
+            (panel.x + int(24 * s), panel.y + int(16 * s)),
         )
 
         self.craft_rects = []
-        y = panel.y + 62
+        y = panel.y + title_h
 
         for recipe in RECIPES:
             name, result, count, cost = recipe
@@ -847,38 +961,34 @@ class Game:
             )
 
             rect = pygame.Rect(
-                panel.x + 22, y, panel.w - 44, 44
+                panel.x + int(22 * s), y,
+                panel.w - int(44 * s), row_h,
             )
             pygame.draw.rect(
                 self.screen,
                 (44, 56, 80) if can_craft else (32, 36, 50),
                 rect,
-                border_radius=7,
+                border_radius=max(4, int(7 * s)),
             )
 
             cost_text = ", ".join(
                 f"{ITEM_NAMES[k]} x{v} ({self.inv.get(k, 0)})"
                 for k, v in cost.items()
             )
-            text = self.font.render(
+            text = self.text(
                 f"{name} - {cost_text}",
-                True,
-                (235, 240, 255)
-                if can_craft
-                else (128, 136, 154),
+                (235, 240, 255) if can_craft else (128, 136, 154),
             )
-            self.screen.blit(text, (rect.x + 14, rect.y + 13))
+            self.screen.blit(text, (rect.x + int(14 * s),
+                                    rect.y + (row_h - text.get_height()) // 2))
 
             self.craft_rects.append((rect, recipe))
-            y += 52
+            y += step
 
         self.screen.blit(
-            self.font.render(
-                "Click a recipe to craft - E/Esc to close",
-                True,
-                (180, 190, 205),
-            ),
-            (panel.x + 24, panel.bottom - 30),
+            self.text("Click a recipe to craft - E/Esc to close",
+                      (180, 190, 205)),
+            (panel.x + int(24 * s), panel.bottom - footer_h + int(6 * s)),
         )
 
     # ------------------------------------------------------------ events
@@ -887,6 +997,15 @@ class Game:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 return False
+
+            if event.type == pygame.VIDEORESIZE:
+                self.W, self.H = event.w, event.h
+                self.sky_surface = None
+                self.light_tile_surface = None
+                self.light_screen_surface = None
+                self._light_cache_key = None
+                self.refresh_ui_scale()
+                self.refresh_icons()
 
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_F11:
@@ -905,15 +1024,7 @@ class Game:
                     self.slot = event.key - pygame.K_1
 
                 elif event.key == pygame.K_f:
-                    tile_x, tile_y = self.mouse_tile()
-
-                    if (
-                        self.inv.get(TORCH, 0) > 0
-                        and self.world.get(tile_x, tile_y) == AIR
-                    ):
-                        self.world.set(tile_x, tile_y, TORCH)
-                        self.inv[TORCH] -= 1
-                        self.invalidate_light()
+                    self.quick_torch()
 
             elif event.type == pygame.MOUSEWHEEL:
                 self.slot = (self.slot - event.y) % len(HOTBAR)

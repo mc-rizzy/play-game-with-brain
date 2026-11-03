@@ -1,6 +1,6 @@
 import math, random
-from config import WORLD_W, WORLD_H
-from tiles import *
+from game.config import WORLD_W, WORLD_H
+from game.tiles import *
 
 class World:
     def __init__(self):

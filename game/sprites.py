@@ -1,8 +1,9 @@
+import os
 import random
 import pygame
 
-from config import TILE
-from tiles import *
+from game.config import TILE, ASSETS_DIR
+from game.tiles import *
 
 ART = 20
 PIXEL = TILE // ART          # 80 // 20 = 4
@@ -151,6 +152,18 @@ def _scale(small):
     return pygame.transform.scale(small, (TILE, TILE))
 
 
+def _convert(surface):
+    """Convert to display format for faster blits (no-op headless)."""
+    try:
+        if pygame.display.get_surface() is None:
+            return surface
+        if surface.get_flags() & pygame.SRCALPHA:
+            return surface.convert_alpha()
+        return surface.convert()
+    except pygame.error:
+        return surface
+
+
 def make_sprites():
     sprites = {}
 
@@ -161,7 +174,7 @@ def make_sprites():
             img = _scale(make_small_tile(tid, rng))
             if tid in TILE_ALPHA:
                 img.set_alpha(TILE_ALPHA[tid])
-            variants.append(img)
+            variants.append(_convert(img))
         sprites[tid] = variants
 
     # Water is drawn from its own animated frames
@@ -190,6 +203,68 @@ def make_water_frames():
         # Bubble rises one step per frame
         px(s, 14, 16 - frame * 3, 2, 2, (180, 224, 255, 180))
 
-        frames.append(_scale(s))
+        frames.append(_convert(_scale(s)))
 
     return frames
+
+
+def _load_png(name):
+    """Load one PNG from game/assets. Returns None when missing."""
+    path = os.path.join(ASSETS_DIR, name)
+    try:
+        if not os.path.isfile(path):
+            return None
+        return pygame.image.load(path).convert_alpha()
+    except (pygame.error, OSError):
+        return None
+
+
+def _flash_variant(surface):
+    """Red hurt-flash copy of an entity frame."""
+    flashed = surface.copy()
+    flashed.fill((255, 90, 90), special_flags=pygame.BLEND_RGB_ADD)
+    return flashed
+
+
+def make_entity_sprites():
+    """Load character/entity pixel art from game/assets/*.png.
+
+    Returns a dict of display-sized frames (nearest-neighbour scaled):
+    player_idle/walk1/walk2 (+ flipped + flash variants), slime_0/1,
+    shade_0/1 (+ flash variants), sword + hearts at native size.
+    Missing files fall back to a solid placeholder so the game still runs.
+    """
+    def placeholder(w, h, colour=(200, 80, 200)):
+        s = pygame.Surface((max(1, w), max(1, h)), pygame.SRCALPHA)
+        s.fill(colour)
+        pygame.draw.rect(s, (30, 30, 36), s.get_rect(), 1)
+        return s
+
+    def sized(name, w, h):
+        small = _load_png(name)
+        if small is None:
+            return _convert(placeholder(w, h))
+        return _convert(pygame.transform.scale(small, (max(1, w), max(1, h))))
+
+    pw, ph = int(TILE * 0.85), int(TILE * 1.90)
+    sw, sh = int(TILE * 0.90), int(TILE * 0.80)
+    hw, hh = int(TILE * 0.80), int(TILE * 1.70)
+
+    out = {}
+    for key in ("player_idle", "player_walk1", "player_walk2"):
+        img = sized(f"{key}.png", pw, ph)
+        out[key] = img
+        out[f"{key}_left"] = _convert(pygame.transform.flip(img, True, False))
+        out[f"{key}_flash"] = _convert(_flash_variant(img))
+        out[f"{key}_left_flash"] = _convert(
+            pygame.transform.flip(out[f"{key}_flash"], True, False))
+    for key, w, h in (("slime_0", sw, sh), ("slime_1", sw, sh),
+                      ("shade_0", hw, hh), ("shade_1", hw, hh)):
+        img = sized(f"{key}.png", w, h)
+        out[key] = img
+        out[f"{key}_flash"] = _convert(_flash_variant(img))
+
+    out["sword"] = _load_png("sword.png") or placeholder(14, 14)
+    out["heart_full"] = _load_png("heart_full.png") or placeholder(10, 9)
+    out["heart_empty"] = _load_png("heart_empty.png") or placeholder(10, 9)
+    return out

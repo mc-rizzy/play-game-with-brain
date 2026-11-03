@@ -1,0 +1,8 @@
+{
+  "_comment": "Copy to ai_input.json to drive the game from a separate AI process. Merged with keyboard (OR).",
+  "move": 0,
+  "jump": false,
+  "attack": false,
+  "place": false,
+  "command": "RIGHT"
+}

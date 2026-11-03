@@ -3,8 +3,8 @@ import random
 
 import pygame
 
-from config import TILE, GRAVITY
-from tiles import WATER
+from game.config import TILE, GRAVITY
+from game.tiles import WATER
 
 
 def move_collide(world, rect, vel, dt):
@@ -93,12 +93,12 @@ class Enemy:
 
             if self.kind == "slime":
                 if self.hop <= 0 and not in_water:
-                    self.vel.x = math.copysign(95, distance) * speed
+                    self.vel.x = math.copysign(speed, distance)
                     self.vel.y = -TILE * 8.0
                     self.hop = 0.8
             else:
                 self.vel.x = (
-                    math.copysign(140, distance) * speed
+                    math.copysign(speed, distance)
                     if abs(distance) > 32
                     else 0
                 )

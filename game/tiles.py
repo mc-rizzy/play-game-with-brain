@@ -1,4 +1,4 @@
-from config import SOLID_LIGHT_FACTOR
+from game.config import SOLID_LIGHT_FACTOR
 
 AIR, GRASS, DIRT, STONE, WOOD, LEAVES, SAND, WATER = range(8)
 COAL, IRON, GOLD, PLANKS, BRICK, GLASS, TORCH, LANTERN = range(8, 16)
