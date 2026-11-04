@@ -300,6 +300,24 @@ class TestGameHookup(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_ML, "numpy/torch not installed")
+class TestVizDefaults(unittest.TestCase):
+    def test_default_model_constant(self):
+        from gnn import viz
+        self.assertFalse(viz.USE_FAST_MODEL)
+        self.assertEqual(viz.MODEL_PATH, "gnn/checkpoints/model.pt")
+
+    def test_resolve_path(self):
+        import tempfile
+        from gnn.viz import ROOT, resolve_path
+        with tempfile.NamedTemporaryFile() as fh:
+            self.assertEqual(resolve_path(fh.name), fh.name)
+        missing = "definitely_missing_xyz_123"
+        self.assertEqual(resolve_path(missing), missing)
+        self.assertTrue(os.path.isdir(ROOT))
+        self.assertTrue(os.path.isdir(os.path.join(ROOT, "gnn")))
+
+
+@unittest.skipUnless(HAVE_ML, "numpy/torch not installed")
 class TestVizLayout(unittest.TestCase):
     def _headless(self):
         try:

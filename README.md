@@ -54,10 +54,11 @@ Install ML deps: `.venv\Scripts\pip install -r gnn/requirements.txt`
    brain (MAML-style), asks Muse to coach the player + tune the live
    gates, and saves `adapter.pt` + `calibration_report.json`.
    (`--source demo` runs with no hardware.)
-4. Watch: `.venv\Scripts\python -m gnn.viz --source replay
-   --model gnn/checkpoints/model.pt` (live board: raw/CAR traces,
-   band powers, GNN feature heatmap, prediction, spectrum, contacts,
-   battery, accel; `--source live --device "..."` on hardware).
+4. Watch: `.venv\Scripts\python -m gnn.viz --source replay`
+   (model auto-loaded; live board: raw/CAR traces, band powers, GNN
+   feature heatmap, prediction, spectrum, contacts, battery, accel;
+   `--source live --device "..."` on hardware; flip `USE_FAST_MODEL`
+   in `gnn/viz.py` for the fast checkpoint).
 5. Play: run `.venv\Scripts\python -m game.main` and
    `.venv\Scripts\python -m gnn.live --source live --device "..."
    --model gnn/checkpoints/model.pt --adapter gnn/checkpoints/adapter.pt`

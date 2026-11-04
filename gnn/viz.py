@@ -30,6 +30,11 @@ from gnn.model import (CHANNELS, CLASSES, FS, BANDS, CONFIDENCE,
 
 TRACE_S = 5.0
 WINDOW_S = 2.0
+# Default checkpoint (used when --model is omitted; an explicit --model
+# always wins). Flip this to preview the low-latency rolling-PSD model.
+USE_FAST_MODEL = False
+MODEL_PATH = ("gnn/checkpoints_fast/model.pt" if USE_FAST_MODEL
+              else "gnn/checkpoints/model.pt")
 # Layout is authored at 1440x900 and scales to any window/fullscreen size.
 BASE_W, BASE_H = 1440, 900
 FEATURE_NAMES = ["dP", "dE", "aP", "aE", "b1P", "b1E", "b2P", "b2E",
@@ -59,6 +64,22 @@ def channel_psd(preprocessed, fs=FS):
     f, psd = welch(preprocessed, fs, nperseg=min(256, preprocessed.shape[-1]),
                    axis=-1)
     return np.asarray(f), np.asarray(psd)
+
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def resolve_path(path):
+    """Resolve a model/data path against cwd, else the workspace root.
+
+    Lets the visualizer start from any working directory (IDE run
+    buttons, double-click, wrong terminal folder) instead of failing
+    with 'file not found'.
+    """
+    if os.path.exists(path):
+        return path
+    alt = os.path.join(ROOT, path)
+    return alt if os.path.exists(alt) else path
 
 
 def fast_frame_features(epoch, fs=FS):
@@ -448,7 +469,9 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="EEG realtime board")
     ap.add_argument("--source", choices=("replay", "live"), default="replay")
     ap.add_argument("--data", default="EEG_recordings")
-    ap.add_argument("--model", default=None)
+    ap.add_argument("--model", default=None,
+                    help=f"checkpoint (default: {MODEL_PATH}; "
+                         f"flip USE_FAST_MODEL in gnn/viz.py)")
     ap.add_argument("--device", default=None)
     ap.add_argument("--fullscreen", action="store_true",
                     help="start fullscreen (F11 toggles at runtime)")
@@ -466,14 +489,25 @@ def main(argv=None):
         raise SystemExit(f"bad --size {args.size!r}, want WxH like 1440x900")
     from gnn.source import ReplaySource, LiveSource
     model, classes = None, CLASSES
-    if args.model:
-        model, cfg = load_checkpoint(args.model)
-        classes = cfg["classes"]
-        print(f"Loaded {args.model} (val_acc={cfg['best_val_acc']})")
+    if args.model:  # explicit path: must exist, no silent fallback
+        model_path = resolve_path(args.model)
+        if not os.path.exists(model_path):
+            raise SystemExit(f"model not found: {model_path}")
     else:
-        print("NOTE: no --model given, prediction panel shows NO MODEL.")
+        model_path = resolve_path(MODEL_PATH)
+        if not os.path.exists(model_path):
+            print(f"NOTE: default model {MODEL_PATH} not found, "
+                  f"prediction panel shows NO MODEL.")
+            print("Train one: python -m gnn.train --data EEG_recordings "
+                  "--out gnn/checkpoints")
+            model_path = None
+    if model_path:
+        model, cfg = load_checkpoint(model_path)
+        classes = cfg["classes"]
+        print(f"Loaded {model_path} (val_acc={cfg['best_val_acc']})")
     if args.source == "replay":
-        source = ReplaySource(args.data, expected_channels=CHANNELS,
+        source = ReplaySource(resolve_path(args.data),
+                              expected_channels=CHANNELS,
                               interleave=not args.no_interleave)
     else:
         if not args.device:
