@@ -29,6 +29,7 @@ def _stub_world(water=False):
 def _stub_player(x, hp=10):
     return SimpleNamespace(
         rect=pygame.Rect(x, 8 * TILE, int(TILE * 0.8), int(TILE * 1.5)),
+        vel=pygame.Vector2(0, 0),
         on_ground=True, hp=hp)
 
 
@@ -72,7 +73,7 @@ class TestAutopilotLogic(unittest.TestCase):
         act = Autopilot(direction=1).action(game, 1 / 60.0)
         self.assertTrue(act["jump"])
 
-    def test_strike_range_swings_sword(self):
+    def test_strike_range_braces_then_bursts(self):
         from game.autopilot import Autopilot
         from game.tiles import HOTBAR, SWORD
         player = _stub_player(100)
@@ -80,21 +81,46 @@ class TestAutopilotLogic(unittest.TestCase):
                    player.rect.centery - 32)
         game = _stub_game(player, _stub_world(), [foe])
         agent = Autopilot(direction=1)
-        attacks = [agent.action(game, 0.1) for _ in range(6)]
+        first = agent.action(game, 0.1)
+        self.assertFalse(first["attack"])  # startle beat, no instant swing
+        attacks = [first] + [agent.action(game, 0.1) for _ in range(23)]
         self.assertTrue(all(a["slot"] == HOTBAR.index(SWORD)
                             for a in attacks))
-        self.assertTrue(any(a["attack"] for a in attacks))
         self.assertTrue(all(a["move"] == 0.0 for a in attacks))
+        self.assertTrue(any(a["attack"] for a in attacks))
 
-    def test_far_enemy_approached(self):
+    def test_far_enemy_approached_cautiously(self):
         from game.autopilot import Autopilot
         player = _stub_player(100)
         foe = _foe(player.rect.centerx + 300 - 32,
                    player.rect.centery - 32)
         game = _stub_game(player, _stub_world(), [foe])
         act = Autopilot(direction=1).action(game, 1 / 60.0)
-        self.assertEqual(act["move"], 1.0)
+        self.assertGreater(act["move"], 0.5)
+        self.assertLessEqual(act["move"], 1.0)
         self.assertFalse(act["attack"])
+
+    def test_idle_pause_while_wandering(self):
+        from unittest import mock
+        from game.autopilot import Autopilot
+        game = _stub_game(_stub_player(100), _stub_world())
+        agent = Autopilot(direction=1)
+        with mock.patch("game.autopilot.random.random", return_value=0.1):
+            paused = any(agent.action(game, 0.1)["move"] == 0.0
+                         for _ in range(80))
+        self.assertTrue(paused, "wander should sometimes pause")
+
+    def test_hard_landing_pauses(self):
+        from game.autopilot import Autopilot
+        player = _stub_player(100)
+        game = _stub_game(player, _stub_world())
+        agent = Autopilot(direction=1)
+        player.on_ground = False
+        player.vel.y = 900.0
+        agent.action(game, 1 / 60.0)  # airborne: record the fall
+        player.on_ground = True
+        act = agent.action(game, 1 / 60.0)  # touchdown: recovery pause
+        self.assertEqual(act["move"], 0.0)
 
     def test_low_hp_retreats(self):
         from game.autopilot import Autopilot
