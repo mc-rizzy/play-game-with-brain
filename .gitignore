@@ -4,3 +4,4 @@ __pycache__/
 game/ai_input.json
 .DS_Store
 .env
+*$py.class
