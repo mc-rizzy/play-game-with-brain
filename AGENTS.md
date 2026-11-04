@@ -7,7 +7,7 @@
 - Regenerate pixel art: `.venv\Scripts\python game/generate_assets.py` (writes `game/assets/*.png`)
 - Train EEG model locally: `.venv\Scripts\python -m gnn.train --data EEG_recordings --out gnn/checkpoints`
 - Train EEG model on Modal: `.venv\Scripts\modal run gnn/modal_train.py --data EEG_recordings --out gnn/checkpoints` (needs `pip install modal` + `modal setup`; `MODAL_GPU=T4` for GPU)
-- EEG visualizer: `.venv\Scripts\python -m gnn.viz --source replay --model gnn/checkpoints/model.pt`
+- EEG visualizer: `.venv\Scripts\python -m gnn.viz --source replay --model gnn/checkpoints/model.pt` (`--fullscreen`, F11 toggles, window auto-fits any display)
 - Brain bridge: `.venv\Scripts\python -m gnn.live --source live --device "..." --model gnn/checkpoints/model.pt`
 - Calibrate a new brain (15 s wizard): `.venv\Scripts\python -m game.calibrate --source live --device "..." --model gnn/checkpoints/model.pt` (or press C in-game; `--source demo` needs no hardware)
 - Bridge with personal adapter: add `--adapter gnn/checkpoints/adapter.pt` (wizard output); add `--muse-fallback` for Muse gray-zone referee

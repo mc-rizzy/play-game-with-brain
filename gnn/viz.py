@@ -10,9 +10,10 @@ A comprehensive live rendering of the BrainAccess Mini stream::
 BrainAccess SDK + mne + the headset (Windows).
 
 Panels: raw / CAR-spatial-filtered traces (C toggles), per-channel band
-powers, the 12 GNN node features per channel as a heatmap, the live
+powers, the GNN node features per channel as a heatmap, the live
 prediction, a log spectrum of the selected channel (keys 1-8), contact
-quality, battery, and accelerometer. Esc/Q quits.
+quality, battery, and accelerometer. The window fits any display,
+--fullscreen starts fullscreen, F11 toggles, Esc/Q quits.
 """
 
 import argparse
@@ -29,8 +30,11 @@ from gnn.model import (CHANNELS, CLASSES, FS, BANDS, CONFIDENCE,
 
 TRACE_S = 5.0
 WINDOW_S = 2.0
+# Layout is authored at 1440x900 and scales to any window/fullscreen size.
+BASE_W, BASE_H = 1440, 900
 FEATURE_NAMES = ["dP", "dE", "aP", "aE", "b1P", "b1E", "b2P", "b2E",
                  "gP", "gE", "Hm", "Hc"]
+FAST_FEATURE_NAMES = ["tP", "tR", "aP", "aR", "bP", "bR", "gP", "gR"]
 BAND_SHORT = ["d", "a", "b1", "b2", "g"]
 BAND_COLOURS = [(150, 150, 220), (120, 220, 150), (255, 200, 120),
                 (255, 150, 120), (200, 140, 255)]
@@ -57,6 +61,18 @@ def channel_psd(preprocessed, fs=FS):
     return np.asarray(f), np.asarray(psd)
 
 
+def fast_frame_features(epoch, fs=FS):
+    """2 s epoch -> (C, 8): mean of 4x 0.5 s PSD chunk features.
+
+    Matches ``gnn/train.py --fast`` training, for ``--fast`` checkpoints.
+    """
+    from gnn.features import CHUNK_S, extract_chunk_features
+    n = int(round(CHUNK_S * fs))
+    chunks = [extract_chunk_features(epoch[:, i:i + n], fs=fs)
+              for i in range(0, epoch.shape[1] - n + 1, n)]
+    return np.mean(np.stack(chunks), axis=0).astype(np.float32)
+
+
 def _heat_colour(value, span=2.0):
     """Diverging blue->black->red for standardized features."""
     v = max(-1.0, min(1.0, value / span))
@@ -66,17 +82,23 @@ def _heat_colour(value, span=2.0):
 
 
 class Dashboard:
-    def __init__(self, source, model=None, classes=None, size=(1440, 900)):
+    def __init__(self, source, model=None, classes=None, size=(1440, 900),
+                 fullscreen=False):
         import pygame
         self.pygame = pygame
         pygame.init()
         pygame.display.set_caption("EEG board — live traces + features")
-        self.screen = pygame.display.set_mode(size)
-        self.W, self.H = size
-        self.font = pygame.font.SysFont("consolas", 15)
-        self.big = pygame.font.SysFont("consolas", 26, bold=True)
+        self.fullscreen = fullscreen
+        if fullscreen:
+            self.screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+        else:
+            self.screen = pygame.display.set_mode(self._fit_window(size),
+                                                  pygame.RESIZABLE)
+        self.W, self.H = self.screen.get_size()
+        self.refresh_ui_scale()
         self.source = source
         self.model = model
+        self.fin = (model.gc1.lin.in_features if model is not None else 12)
         self.classes = classes or CLASSES
         self.show_car = False
         self.selected = 0
@@ -88,6 +110,70 @@ class Dashboard:
         self.battery = None
         self.accel = None
         self.contacts = None
+
+    # ---------------------------------------------------------- display
+    def _fit_window(self, size=(BASE_W, BASE_H)):
+        """Clamp a window size inside the current display (any device)."""
+        W0, H0 = size
+        try:
+            info = self.pygame.display.Info()
+            if info.current_w > 0 and info.current_h > 0:
+                W0 = min(W0, max(800, info.current_w - 60))
+                H0 = min(H0, max(600, info.current_h - 60))
+        except Exception:
+            pass
+        return (W0, H0)
+
+    def refresh_ui_scale(self):
+        """Scale fonts from the window size (1.0 at 1440x900)."""
+        s = min(self.W / BASE_W, self.H / BASE_H)
+        self.ui_scale = max(0.55, min(1.6, s))
+        pg = self.pygame
+        self.font = pg.font.SysFont("consolas",
+                                    max(11, int(15 * self.ui_scale)))
+        self.big = pg.font.SysFont("consolas",
+                                   max(16, int(26 * self.ui_scale)),
+                                   bold=True)
+
+    def toggle_fullscreen(self):
+        """F11: flip between fullscreen and a display-fitting window."""
+        pg = self.pygame
+        self.fullscreen = not self.fullscreen
+        if self.fullscreen:
+            self.screen = pg.display.set_mode((0, 0), pg.FULLSCREEN)
+        else:
+            self.screen = pg.display.set_mode(self._fit_window(),
+                                              pg.RESIZABLE)
+        self.W, self.H = self.screen.get_size()
+        self.refresh_ui_scale()
+
+    def layout(self):
+        """Panel rects for the current size; valid on any screen >= 800x600.
+
+        Returns {"traces": Rect, "right": (powers, feats, pred),
+        "bottom": (psd, contacts, aux)}.
+        """
+        pg = self.pygame
+        W, H, s = self.W, self.H, self.ui_scale
+        m = int(10 * s)
+        top = int(40 * s) + 6
+        bottom_h = max(int(150 * s),
+                       min(int(H * 0.26), int(230 * s)))
+        brow = H - bottom_h - m
+        mid = int(W * 0.60)
+        traces = pg.Rect(m, top, max(40, mid - m - 8),
+                         max(40, brow - top))
+        rx, rw = mid + 6, max(40, W - mid - 16)
+        rh = max(40, (brow - top - 16) // 3)
+        right = tuple(pg.Rect(rx, top + i * (rh + 8), rw, rh)
+                      for i in range(3))
+        bw = W - 2 * m
+        pw, cw = int(bw * 0.39), int(bw * 0.33)
+        aw = max(40, bw - pw - cw - 2 * m)
+        bottom = (pg.Rect(m, brow, max(40, pw), bottom_h),
+                  pg.Rect(m + pw + m, brow, max(40, cw), bottom_h),
+                  pg.Rect(m + pw + cw + 2 * m, brow, aw, bottom_h))
+        return {"traces": traces, "right": right, "bottom": bottom}
 
     # ------------------------------------------------------------ data
     def poll(self):
@@ -109,7 +195,10 @@ class Dashboard:
         epoch = clean[:, -int(WINDOW_S * FS):]
         feats = None
         if epoch.shape[1] >= 256:
-            feats = extract_node_features(epoch)
+            if self.fin == 8:  # --fast checkpoint: rolling-PSD features
+                feats = fast_frame_features(epoch)
+            else:
+                feats = extract_node_features(epoch)
             if self.model is not None:
                 import torch
                 with torch.no_grad():
@@ -186,7 +275,10 @@ class Dashboard:
             self.screen.blit(lab, (cx, inner.bottom - 18))
 
     def draw_features(self, rect, feats):
-        inner = self._panel(rect, "GNN node features (8 ch x 12, z-scored)")
+        title = ("GNN node features "
+                 f"({feats.shape[0]} ch x {feats.shape[1]}, z-scored)"
+                 if feats is not None else "GNN node features")
+        inner = self._panel(rect, title)
         if feats is None:
             wait = self.font.render("buffering 2 s window...", True,
                                     (200, 200, 120))
@@ -195,7 +287,8 @@ class Dashboard:
         n_ch, n_f = feats.shape
         cw = (inner.w - 44) / n_f
         rh = (inner.h - 20) / n_ch
-        for j, name in enumerate(FEATURE_NAMES[:n_f]):
+        names = FAST_FEATURE_NAMES if n_f == 8 else FEATURE_NAMES
+        for j, name in enumerate(names[:n_f]):
             lab = self.font.render(name, True, (150, 160, 180))
             self.screen.blit(lab, (inner.x + 44 + j * cw + 1, inner.y + 1))
         for i in range(n_ch):
@@ -288,7 +381,8 @@ class Dashboard:
             lines.append(f"accel: {x:+.2f} {y:+.2f} {z:+.2f} m/s2")
         lines.append(f"battery: {self.battery}%"
                      if self.battery is not None else "battery: n/a")
-        lines += ["", "keys:", "C raw/CAR", "1-8 channel", "Q quit"]
+        lines += ["", "keys:", "C raw/CAR", "1-8 channel", "F11 full",
+                  "Q quit"]
         y = inner.y + 4
         for line in lines:
             txt = self.font.render(line, True, (200, 210, 225))
@@ -301,9 +395,14 @@ class Dashboard:
         for event in pg.event.get():
             if event.type == pg.QUIT:
                 return False
+            if event.type == pg.VIDEORESIZE:
+                self.W, self.H = event.w, event.h
+                self.refresh_ui_scale()
             if event.type == pg.KEYDOWN:
                 if event.key in (pg.K_ESCAPE, pg.K_q):
                     return False
+                if event.key == pg.K_F11:
+                    self.toggle_fullscreen()
                 if event.key == pg.K_c:
                     self.show_car = not self.show_car
                 if pg.K_1 <= event.key <= pg.K_8:
@@ -315,8 +414,6 @@ class Dashboard:
         clock = pg.time.Clock()
         n = 0
         running = True
-        mid = int(self.W * 0.60)
-        top, bottom = 46, self.H - 236
         while running and (frames is None or n < frames):
             running = self.handle_keys()
             t0 = time.perf_counter()
@@ -327,20 +424,15 @@ class Dashboard:
                 wait = self.font.render("buffering...", True, (200, 200, 120))
                 self.screen.blit(wait, (20, 80))
             else:
-                self.draw_traces(pg.Rect(10, top, mid - 18, bottom - top),
-                                 data)
-                rx, rw = mid + 6, self.W - mid - 16
-                rh = (bottom - top - 16) // 3
-                self.draw_powers(pg.Rect(rx, top, rw, rh), data["powers"])
-                self.draw_features(pg.Rect(rx, top + rh + 8, rw, rh),
-                                   data["feats"])
-                self.draw_prediction(pg.Rect(rx, top + 2 * rh + 16, rw, rh))
-                brow = self.H - 226
-                bh = 216
-                self.draw_psd(pg.Rect(10, brow, 560, bh),
-                              data["f"], data["psd"])
-                self.draw_contacts(pg.Rect(580, brow, 480, bh))
-                self.draw_aux(pg.Rect(1070, brow, self.W - 1080, bh))
+                panels = self.layout()
+                self.draw_traces(panels["traces"], data)
+                right, bottom = panels["right"], panels["bottom"]
+                self.draw_powers(right[0], data["powers"])
+                self.draw_features(right[1], data["feats"])
+                self.draw_prediction(right[2])
+                self.draw_psd(bottom[0], data["f"], data["psd"])
+                self.draw_contacts(bottom[1])
+                self.draw_aux(bottom[2])
             pg.display.flip()
             self.fps = 0.9 * self.fps + 0.1 / max(1e-3,
                                                  time.perf_counter() - t0)
@@ -355,9 +447,18 @@ def main(argv=None):
     ap.add_argument("--data", default="EEG_recordings")
     ap.add_argument("--model", default=None)
     ap.add_argument("--device", default=None)
+    ap.add_argument("--fullscreen", action="store_true",
+                    help="start fullscreen (F11 toggles at runtime)")
+    ap.add_argument("--size", default="1440x900",
+                    help="windowed size WxH (clamped to fit the display)")
     ap.add_argument("--frames", type=int, default=None,
                     help="quit after N frames (headless smoke)")
     args = ap.parse_args(argv)
+    try:
+        size = tuple(int(v) for v in args.size.lower().split("x"))
+        assert len(size) == 2 and min(size) > 0
+    except (ValueError, AssertionError):
+        raise SystemExit(f"bad --size {args.size!r}, want WxH like 1440x900")
     from gnn.source import ReplaySource, LiveSource
     model, classes = None, CLASSES
     if args.model:
@@ -371,7 +472,8 @@ def main(argv=None):
             raise SystemExit("--device required for live source")
         source = LiveSource(args.device)
     with source:
-        Dashboard(source, model, classes).run(frames=args.frames)
+        Dashboard(source, model, classes, size=size,
+                  fullscreen=args.fullscreen).run(frames=args.frames)
     return 0
 
 

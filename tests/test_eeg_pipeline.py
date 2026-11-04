@@ -24,15 +24,18 @@ class TestRecordings(unittest.TestCase):
         from gnn import recordings
         from gnn.model import CHANNELS
         trials = recordings.find_trials(os.path.join(ROOT, "EEG_recordings"))
-        self.assertEqual(len(trials), 1)
-        label, path = trials[0]
-        self.assertEqual(label, "left")
+        # Grows as the user records (target: ~30 trials/command).
+        self.assertGreaterEqual(len(trials), 1)
+        left = [t for t in trials if t[0] == "left"]
+        self.assertGreaterEqual(len(left), 1)
+        _label, path = left[0]
         trial = recordings.load_trial(path, expected_channels=CHANNELS)
         n_ch, total = trial["data"].shape
         self.assertEqual(n_ch, 8)
-        # ~12-13 s example; chunk widths vary (25/50), count varies
-        # slightly with WAL recovery, so assert internal consistency
-        self.assertGreater(total, 2500)
+        # Trial lengths vary (example ~12 s, user trials ~5 s); chunk
+        # widths vary (25/50) with WAL recovery, so assert internal
+        # consistency plus a >=2 s minimum for one window.
+        self.assertGreaterEqual(total, 500)
         self.assertEqual(total, sum(trial["chunk_samples"]))
         self.assertEqual(len(trial["time"]), total)
         self.assertEqual(trial["sf"], 250.0)

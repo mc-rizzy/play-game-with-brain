@@ -198,7 +198,8 @@ def train(model, Xtr, ytr, Xva, yva, epochs=120, batch=16, lr=1e-3,
         torch.save({"state_dict": model.state_dict(),
                     "channels": getattr(model, "channels", CHANNELS),
                     "classes": classes, "n_classes": n_out, "fs": FS,
-                    "fin": N_FEATURES, "best_val_acc": best}, save_path)
+                    "fin": model.gc1.lin.in_features,
+                    "best_val_acc": best}, save_path)
         print(f"Saved best model -> {save_path}")
     return history, best
 
