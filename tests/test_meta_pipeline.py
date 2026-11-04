@@ -204,6 +204,120 @@ class TestFewShotAdapter(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_ML, "numpy/torch not installed")
+class TestCheckpointFin(unittest.TestCase):
+    def test_nondefault_fin_roundtrips(self):
+        import tempfile
+        from gnn.model import EEGGraphNet, load_checkpoint, train
+        rng = np.random.RandomState(0)
+        X = rng.randn(16, 8, 8).astype(np.float32)
+        y = np.array([0, 1] * 8)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "fast.pt")
+            train(EEGGraphNet(fin=8, n_classes=2), X[:12], y[:12],
+                  X[12:], y[12:], epochs=2, batch=4, save_path=path,
+                  log_every=10)
+            loaded, _cfg = load_checkpoint(path)
+            self.assertEqual(loaded.gc1.lin.in_features, 8)
+            self.assertEqual(tuple(loaded(torch.randn(1, 8, 8)).shape),
+                             (1, 2))
+
+
+@unittest.skipUnless(HAVE_ML, "numpy/torch not installed")
+class TestVizFastModel(unittest.TestCase):
+    def test_dashboard_fast_model_headless(self):
+        try:
+            import pygame  # noqa: F401
+        except ImportError:
+            self.skipTest("pygame not installed")
+        import time
+        os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+        os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
+        from gnn.model import CHANNELS, EEGGraphNet
+        from gnn.source import ReplaySource
+        from gnn.viz import Dashboard, fast_frame_features
+        rng = np.random.RandomState(0)
+        self.assertEqual(fast_frame_features(rng.randn(8, 500)).shape,
+                         (8, 8))
+        src = ReplaySource(os.path.join(ROOT, "EEG_recordings"),
+                           realtime=False, expected_channels=CHANNELS)
+        with src:
+            time.sleep(0.5)
+            dash = Dashboard(src, EEGGraphNet(fin=8))
+            self.assertEqual(dash.fin, 8)
+            dash.run(frames=2)
+
+
+@unittest.skipUnless(HAVE_ML, "numpy/torch not installed")
+class TestVizLayout(unittest.TestCase):
+    def _headless(self):
+        try:
+            import pygame
+        except ImportError:
+            self.skipTest("pygame not installed")
+        os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+        os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
+        import pygame
+        return pygame
+
+    def test_layout_valid_on_various_sizes(self):
+        pygame = self._headless()
+        from gnn.viz import Dashboard
+        dash = Dashboard(None)
+        try:
+            sizes = [(1920, 1080), (1440, 900), (1366, 768),
+                     (1280, 720), (1024, 768), (800, 600)]
+            for W, H in sizes:
+                dash.W, dash.H = W, H
+                dash.refresh_ui_scale()
+                panels = dash.layout()
+                rects = [panels["traces"], *panels["right"],
+                         *panels["bottom"]]
+                self.assertEqual(len(rects), 7)
+                for r in rects:
+                    self.assertGreaterEqual(r.w, 40, (W, H))
+                    self.assertGreaterEqual(r.h, 40, (W, H))
+                    self.assertGreaterEqual(r.x, 0, (W, H))
+                    self.assertGreaterEqual(r.y, 0, (W, H))
+                    self.assertLessEqual(r.right, W, (W, H))
+                    self.assertLessEqual(r.bottom, H, (W, H))
+        finally:
+            pygame.quit()
+
+    def test_resize_event_rescales(self):
+        pygame = self._headless()
+        from gnn.viz import Dashboard
+        dash = Dashboard(None)
+        try:
+            dash.W, dash.H = 1440, 900
+            dash.refresh_ui_scale()
+            self.assertAlmostEqual(dash.ui_scale, 1.0)
+            pygame.event.post(pygame.event.Event(
+                pygame.VIDEORESIZE, {"w": 800, "h": 600}))
+            self.assertTrue(dash.handle_keys())
+            self.assertEqual((dash.W, dash.H), (800, 600))
+            self.assertLess(dash.ui_scale, 1.0)
+        finally:
+            pygame.quit()
+
+    def test_fullscreen_toggle_headless(self):
+        pygame = self._headless()
+        import time
+        from gnn.model import CHANNELS
+        from gnn.source import ReplaySource
+        from gnn.viz import Dashboard
+        src = ReplaySource(os.path.join(ROOT, "EEG_recordings"),
+                           realtime=False, expected_channels=CHANNELS)
+        with src:
+            time.sleep(0.5)
+            dash = Dashboard(src)
+            dash.toggle_fullscreen()
+            self.assertTrue(dash.fullscreen)
+            dash.toggle_fullscreen()
+            self.assertFalse(dash.fullscreen)
+            dash.run(frames=1)
+
+
+@unittest.skipUnless(HAVE_ML, "numpy/torch not installed")
 class TestMuseClient(unittest.TestCase):
     def test_api_key_env_wins(self):
         from unittest import mock
