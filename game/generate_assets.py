@@ -4,12 +4,9 @@ Run once from the workspace root::
 
     python game/generate_assets.py
 
-or from inside ``game/``::
-
-    python generate_assets.py
-
-Output: ``game/assets/*.png`` — small pixel-art images loaded by
-``sprites.py`` and scaled up with nearest-neighbour at runtime.
+Output: ``game/assets/*.png`` — 16x16 pixel-art images (tall characters
+are 16x32, two stacked 16x16 cells) loaded by ``sprites.py`` and scaled
+up with nearest-neighbour at runtime.
 """
 
 import os
@@ -33,6 +30,8 @@ PAL = {
     "P": (70, 92, 148, 255),     # pants
     "p": (54, 72, 116, 255),     # pants dark
     "B": (88, 64, 44, 255),      # boots
+    "K": (60, 42, 28, 255),      # belt leather
+    "k": (240, 200, 90, 255),    # belt buckle
     "G": (92, 210, 104, 255),    # slime body
     "g": (62, 160, 78, 255),     # slime dark
     "L": (170, 240, 180, 255),   # slime highlight
@@ -50,6 +49,10 @@ PAL = {
     "f": (255, 150, 160, 255),   # heart highlight
     "M": (68, 54, 64, 255),      # heart empty
     "m": (48, 38, 46, 255),      # heart empty dark
+    "a": (124, 112, 168, 255),   # bat body
+    "b": (72, 62, 116, 255),     # bat wing
+    "d": (228, 228, 238, 255),   # bone
+    "o": (158, 160, 182, 255),   # bone shadow
 }
 
 
@@ -95,80 +98,71 @@ def compile_map(name, lines):
 
 
 # ---------------------------------------------------------------- player
-# 14 wide x 30 tall, facing right (runtime flips for left).
+# 16 wide x 24 tall (1 x 1.5 blocks), facing right. Boot soles sit on
+# the last row so the character touches the ground.
 
 PLAYER_TOP = [
-    "....OOOOOO....",
-    "..OOHHHHHHOO..",
-    "..OHhhhhhhHO..",
-    "..OHHHHHHHHO..",
-    "..OSSSSSSSSO..",
-    "..OSSSSSSSESO.",
-    "..OSSSSSSSSO..",
-    "..OSssSSSSSO..",
-    "...OSSSSOO....",
-    "..OOTTTTTTTO..",
-    ".OOTTTTTTTTTO.",
-    ".OTtTTTTTTtTO.",
-    ".OTtTTTTTTtTO.",
-    ".OStTTTTTTtSO.",
-    ".OStTTTTTTtSO.",
-    ".OStTttttTtSO.",
-    "..OTTTTTTTTO..",
+    ".....OOOOOO.....",
+    "...OOHHHHHHOO...",
+    "..OHHhhhhhhHHO..",
+    "..OHHHHHHHHHHO..",
+    "..OHSSSSSSSSO...",
+    "..OHSSSSSSESO...",
+    "..OHSSSSSSSSO...",
+    "..OHSSSssSSSO...",
+    "...OSSSSSSO.....",
+    "..OOTTTTTTTTO...",
+    "..OTtTTTTTTtTO..",
+    "..OStTTTTTTtSO..",
+    "..OKKKKKKKKKKO..",
+    "..OKKKKkkKKKKO..",
+    "...OPPPPPPPO....",
 ]
 
 PLAYER_IDLE_LEGS = [
-    "...OPPPPPPO...",
-    "...OPpPPpPO...",
-    "...OPpPPpPO...",
-    "...OPpPPpPO...",
-    "...OPpPPpPO...",
-    "...OPpPPpPO...",
-    "...OPpPPpPO...",
-    "...OPpPPpPO...",
-    "..OBBP..PPBB..",
-    "..OBBO..OBBO..",
-    "..OOOO..OOOO..",
-    "...OO....OO...",
-    ".............",
+    "...OPPPPPPPO....",
+    "...OPpPPPpPO....",
+    "...OPpPPPpPO....",
+    "...OPpPPPpPO....",
+    "...OPpP..PpPO...",
+    "...OPpP..PpPO...",
+    "...OBBP..PPBO...",
+    "...OBBO...OBBO..",
+    "...OOOO...OOOO..",
 ]
 
-PLAYER_WALK1_LEGS = [  # left leg forward
-    "...OPPPPPPO...",
-    "...OPpPPpPO...",
-    "..OOPpPPpPO...",
-    "..OPOpPPpPO...",
-    ".OPO.PPpPO....",
-    ".OPO.PPpPO....",
-    ".OBO..PpPO....",
-    ".OBO..PpPOO...",
-    ".OBB...PpPBO..",
-    ".OOO...OBBBO..",
-    "..O.....OOOO..",
-    ".............",
-    ".............",
+PLAYER_WALK1_LEGS = [  # stride left
+    "...OPPPPPPPO....",
+    "...OPpPPPpPO....",
+    "...OPpPPPpPO....",
+    "..OOPpPPPpPO....",
+    "..OPpP..PpPO....",
+    ".OPpP....PpPO...",
+    ".OBBP....PPBO...",
+    ".OBO......OBO...",
+    ".OOO......OOO...",
 ]
 
-PLAYER_WALK2_LEGS = [  # right leg forward
-    "...OPPPPPPO...",
-    "...OPpPPpPO...",
-    "...OPpPPpPOO..",
-    "...OPpPPpOPO..",
-    "....OPpPP.OPO.",
-    "....OPpPP.OPO.",
-    "....OPpP..OBO.",
-    "...OOPpP..OBO.",
-    "..OBPpP...BBO.",
-    "..OBBBO...OOO.",
-    "..OOOO.....O..",
-    ".............",
-    ".............",
+PLAYER_WALK2_LEGS = [  # stride right
+    "...OPPPPPPPO....",
+    "...OPpPPPpPO....",
+    "...OPpPPPpPO....",
+    "....OPpPPPpPO...",
+    "....OPpP..PpPO..",
+    "...OPpP....PpPO.",
+    "...OBBP....PPBO.",
+    "...OBO......OBO.",
+    "...OOO......OOO.",
 ]
 
 # ---------------------------------------------------------------- slime
-# 16 wide x 14 tall.
+# 16 wide x 16 tall.
 
-SLIME_0 = [
+SLIME_0 = [  # base sits on the last row
+    "................",
+    "................",
+    "................",
+    "................",
     "................",
     ".....OOOOOO.....",
     "...OOGGGGGGOO...",
@@ -181,11 +175,14 @@ SLIME_0 = [
     "OGgGGGGGGGGGGEO.",
     ".OggGGGGGGGGGO..",
     ".OOOOOOOOOOOO...",
-    "................",
-    "................",
 ]
 
-SLIME_1 = [  # squashed
+SLIME_1 = [  # squashed, base sits on the last row
+    "................",
+    "................",
+    "................",
+    "................",
+    "................",
     "................",
     "................",
     "................",
@@ -197,104 +194,107 @@ SLIME_1 = [  # squashed
     "OGggGGGGGGGGGEO.",
     ".OggGGGGGGGGGO..",
     "..OOOOOOOOOOO...",
-    "................",
-    "................",
-    "................",
 ]
 
 # ---------------------------------------------------------------- shade
-# 14 wide x 30 tall.
+# 16 wide x 32 tall (two stacked 16x16 cells).
 
-SHADE_0 = [
-    "....OOOOOO....",
-    "..OOCCCCCCOO..",
-    ".OCCccccccCCO.",
-    ".OCccccccccCO.",
-    ".OCcRRccRRcCO.",
-    ".OCcRRccRRcCO.",
-    ".OCccrccrccCO.",
-    ".OCccccccccCO.",
-    ".OCccccccccCO.",
-    ".ODDccccccDDO.",
-    ".ODDccccccDDO.",
-    "..ODDccccDDO..",
-    "..ODDccccDDO..",
-    "..ODDccccDDO..",
-    "..ODDccccDDO..",
-    "..ODDccccDDO..",
-    "..ODDccccDDO..",
-    "...DDccccDD...",
-    "...DDccccDD...",
-    "...DDccccDD...",
-    "...DDc..cDD...",
-    "...DDc..cDD...",
-    "...OO....OO...",
-    ".............",
-    ".............",
-    ".............",
-    ".............",
-    ".............",
-    ".............",
-    ".............",
+SHADE_0 = [  # feet sit on the last row
+    "................",
+    "................",
+    "................",
+    "................",
+    "................",
+    "................",
+    "................",
+    "................",
+    "................",
+    ".....OOOOOO.....",
+    "...OOCCCCCCOO...",
+    "..OCCccccccCCO..",
+    "..OCccccccccCO..",
+    "..OCcRRccRRcCO..",
+    "..OCcRRccRRcCO..",
+    "..OCccrccrccCO..",
+    "..OCccccccccCO..",
+    "..OCccccccccCO..",
+    "..ODDccccccDDO..",
+    "..ODDccccccDDO..",
+    "...ODDccccDDO...",
+    "...ODDccccDDO...",
+    "...ODDccccDDO...",
+    "...ODDccccDDO...",
+    "...ODDccccDDO...",
+    "...ODDccccDDO...",
+    "....DDccccDD....",
+    "....DDccccDD....",
+    "....DDccccDD....",
+    "....DDc..cDD....",
+    "....DDc..cDD....",
+    "....OO....OO....",
 ]
 
-SHADE_1 = [  # cloak sway + blink
-    "....OOOOOO....",
-    "..OOCCCCCCOO..",
-    ".OCCccccccCCO.",
-    ".OCccccccccCO.",
-    ".OCcRrccrRcCO.",
-    ".OCccccccccCO.",
-    ".OCccccccccCO.",
-    ".OCccccccccCO.",
-    "..CccccccccC..",
-    "..DDccccccDD..",
-    "..DDccccccDD..",
-    "...DDccccDD...",
-    "...DDccccDD...",
-    "...DDccccDD...",
-    "...DDccccDD...",
-    "...DDccccDDD..",
-    "...DDccccDDD..",
-    "....DccccDD...",
-    "....DccccDD...",
-    "....Dc..cDD...",
-    "....Dc...DD...",
-    "....OO...OO...",
-    ".............",
-    ".............",
-    ".............",
-    ".............",
-    ".............",
-    ".............",
-    ".............",
-    ".............",
+SHADE_1 = [  # cloak sway + blink, feet on the last row
+    "................",
+    "................",
+    "................",
+    "................",
+    "................",
+    "................",
+    "................",
+    "................",
+    "................",
+    "................",
+    ".....OOOOOO.....",
+    "...OOCCCCCCOO...",
+    "..OCCccccccCCO..",
+    "..OCccccccccCO..",
+    "..OCcRrccrRcCO..",
+    "..OCccccccccCO..",
+    "..OCccccccccCO..",
+    "..OCccccccccCO..",
+    "...CccccccccC...",
+    "...DDccccccDD...",
+    "...DDccccccDD...",
+    "....DDccccDD....",
+    "....DDccccDD....",
+    "....DDccccDD....",
+    "....DDccccDD....",
+    "....DDccccDDD...",
+    "....DDccccDDD...",
+    ".....DccccDD....",
+    ".....DccccDD....",
+    ".....Dc..cDD....",
+    ".....Dc...DD....",
+    ".....OO...OO....",
 ]
 
 # ---------------------------------------------------------------- sword
-# 14 x 14 diagonal sword for hotbar + swing.
+# 16 x 16 diagonal sword for hotbar + swing.
 
 SWORD = [
-    "..........OO..",
-    ".........OVVO.",
-    "........OVVVO.",
-    ".......OVVvVO.",
-    "......OVVvVO..",
-    ".....OVVvVO...",
-    "....OVVvVO....",
-    "...OVVvVO.....",
-    "..OVVvVO......",
-    ".OOVvVO.......",
-    ".NNNVO........",
-    "..NNN.........",
-    "..NnN.........",
-    "...n..........",
+    "................",
+    "...........OO...",
+    "..........OVVO..",
+    ".........OVVVO..",
+    "........OVVvVO..",
+    ".......OVVvVO...",
+    "......OVVvVO....",
+    ".....OVVvVO.....",
+    "....OVVvVO......",
+    "...OVVvVO.......",
+    "..OOVvVO........",
+    "..NNNVO.........",
+    "...NNN..........",
+    "...NnN..........",
+    "....n...........",
+    "................",
 ]
 
 # ---------------------------------------------------------------- hearts
-# 10 x 9 GUI hearts.
+# 16 x 16 GUI hearts (10x9 heart centred on transparent padding).
 
-HEART_FULL = [
+_HEART_FULL_CORE = [
     ".OO....OO.",
     "OFfO..OFfO",
     "OFfFOOOFFO",
@@ -306,7 +306,7 @@ HEART_FULL = [
     "....OO....",
 ]
 
-HEART_EMPTY = [
+_HEART_EMPTY_CORE = [
     ".OO....OO.",
     "OMmO..OMmO",
     "OMmMOOMMMO",
@@ -318,6 +318,83 @@ HEART_EMPTY = [
     "....OO....",
 ]
 
+HEART_FULL = (
+    ["................"] * 3
+    + ["..." + row + "..." for row in _HEART_FULL_CORE]
+    + ["................"] * 4
+)
+
+HEART_EMPTY = (
+    ["................"] * 3
+    + ["..." + row + "..." for row in _HEART_EMPTY_CORE]
+    + ["................"] * 4
+)
+
+BAT_0 = (
+    "OO............OO",
+    "ObbO........ObbO",
+    "ObbbO......ObbbO",
+    ".ObbbO....ObbbO.",
+    "..ObbbO..ObbbO..",
+    "....ObbaaabbO...",
+    ".....OaaaaO.....",
+    ".....ORaaRO.....",
+    ".....OaaaaO.....",
+    "......OaaO......",
+    "......O..O......",
+    ".....OO..OO.....",
+    "................",
+    "................",
+    "................",
+    "................",
+)
+
+BAT_1 = (
+    "................",
+    "......O..O......",
+    ".....OaaaaO.....",
+    ".O...ORaaRO...O.",
+    ".Ob..OaaaaO..bO.",
+    ".Obb.OaaaaO.bbO.",
+    "..ObbOaaaaObbO..",
+    "..ObbOa..aObbO..",
+    "...ObO....ObO...",
+    "...ObO....ObO...",
+    "....OO......OO..",
+    "................",
+    "................",
+    "................",
+    "................",
+    "................",
+)
+
+SKELETON_0 = (
+    "....OOOOOOOO....",
+    "...OddddddddO...",
+    "...OdEEddEEdo...",
+    "...Oddddddddo...",
+    "...Oddooodddo...",
+    "....OOooooOO....",
+    "....oooddooo....",
+    "...ooooddoooo...",
+    "....oooddooo....",
+    ".....ooddoo.....",
+    ".....ooddoo.....",
+    "......OddO......",
+    ".....OooooO.....",
+    ".....OooooO.....",
+    ".....Od..dO.....",
+    ".....Od..dO.....",
+    ".....Od..dO.....",
+    ".....Od..dO.....",
+    ".....Od..dO.....",
+    ".....Od..dO.....",
+    ".....Od..dO.....",
+    ".....Od.dOOO....",
+    ".....Od.........",
+    ".....OOO........",
+)
+
 MAPS = {
     "player_idle": PLAYER_TOP + PLAYER_IDLE_LEGS,
     "player_walk1": PLAYER_TOP + PLAYER_WALK1_LEGS,
@@ -326,6 +403,11 @@ MAPS = {
     "slime_1": SLIME_1,
     "shade_0": SHADE_0,
     "shade_1": SHADE_1,
+    "bat_0": BAT_0,
+    "bat_1": BAT_1,
+    "skeleton_0": SKELETON_0,
+    "skeleton_1": (SKELETON_0[:14]
+                   + tuple(row[::-1] for row in SKELETON_0[14:])),
     "sword": SWORD,
     "heart_full": HEART_FULL,
     "heart_empty": HEART_EMPTY,

@@ -1,5 +1,6 @@
 {
     "python.analysis.extraPaths": [
         "./BrainAccessSDK-linux/python_api"
-    ]
+    ],
+    "python-envs.defaultEnvManager": "ms-python.python:system"
 }

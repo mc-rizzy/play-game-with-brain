@@ -8,6 +8,9 @@ Needs at least two commands with trials each; ~30 trials/command is the
 calibration target (see EEG_recordings/README.md). Splits whole trials
 80/20 stratified — windows from one trial never land on both sides.
 Saves ``model.pt`` (weights + channels/classes) and ``config.json``.
+
+This trains on your local device (free). For cloud training instead, see
+``gnn/modal_train.py`` (same data, same output; needs Modal credits).
 """
 
 import argparse
@@ -30,6 +33,20 @@ def featurize(X, mains=50):
     return np.stack(feats).astype(np.float32)
 
 
+def featurize_fast(X, mains=50):
+    """Low-latency path: each 2 s window -> mean of 4x 0.5 s PSD chunks."""
+    from gnn.features import CHUNK_S, N_FAST_FEATURES, extract_chunk_features
+    n = int(round(CHUNK_S * FS))
+    feats = []
+    for ep in X:
+        chunks = [extract_chunk_features(ep[:, i:i + n], fs=FS, mains=mains)
+                  for i in range(0, ep.shape[1] - n + 1, n)]
+        feats.append(np.mean(np.stack(chunks), axis=0))
+    F = np.stack(feats).astype(np.float32)
+    assert F.shape[2] == N_FAST_FEATURES, F.shape
+    return F
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Train EEG command GNN")
     ap.add_argument("--data", default="EEG_recordings")
@@ -43,6 +60,8 @@ def main(argv=None):
     ap.add_argument("--window-s", type=float, default=2.0)
     ap.add_argument("--step-s", type=float, default=0.25)
     ap.add_argument("--hidden", type=int, default=32)
+    ap.add_argument("--fast", action="store_true",
+                    help="train the 0.5 s rolling-PSD 8-dim model (low latency)")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args(argv)
 
@@ -63,13 +82,19 @@ def main(argv=None):
           f"({len(set(tids[tr]))}/{len(set(tids[va]))} trials)")
 
     print("Extracting features...")
-    F = featurize(X, args.mains)
+    if args.fast:
+        from gnn.features import N_FAST_FEATURES
+        F = featurize_fast(X, args.mains)
+        fin = N_FAST_FEATURES
+    else:
+        F = featurize(X, args.mains)
+        fin = N_FEATURES
     print(f"Features: {F.shape}")
 
     import torch
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
-    model = EEGGraphNet(channels=CHANNELS, fin=N_FEATURES,
+    model = EEGGraphNet(channels=CHANNELS, fin=fin,
                         hidden=args.hidden,
                         n_classes=len(CLASSES)).to(device)
     os.makedirs(args.out, exist_ok=True)
@@ -79,7 +104,7 @@ def main(argv=None):
                           save_path=os.path.join(args.out, "model.pt"))
     with open(os.path.join(args.out, "config.json"), "w") as fh:
         json.dump({"channels": CHANNELS, "classes": CLASSES, "fs": FS,
-                   "fin": N_FEATURES, "hidden": args.hidden,
+                   "fin": fin, "hidden": args.hidden, "fast": args.fast,
                    "mains": args.mains, "window_s": args.window_s,
                    "step_s": args.step_s, "best_val_acc": best,
                    "n_trials": len(trials), "labels": labels}, fh, indent=2)

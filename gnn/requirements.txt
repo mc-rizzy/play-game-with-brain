@@ -8,3 +8,4 @@ torch>=2.2
 # Live headset streaming additionally needs (Windows):
 #   mne, and the BrainAccess Windows SDK (python_api) installed, e.g.
 #   pip install mne && pip install <path-to>/BrainAccessSDK/python_api
+# Cloud training additionally needs: pip install modal (then: modal setup)

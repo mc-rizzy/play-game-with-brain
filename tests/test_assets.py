@@ -7,16 +7,20 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ASSETS = os.path.join(ROOT, "game", "assets")
 
 EXPECTED = {
-    "player_idle.png": (14, 30),
-    "player_walk1.png": (14, 30),
-    "player_walk2.png": (14, 30),
-    "slime_0.png": (16, 14),
-    "slime_1.png": (16, 14),
-    "shade_0.png": (14, 30),
-    "shade_1.png": (14, 30),
-    "sword.png": (14, 14),
-    "heart_full.png": (10, 9),
-    "heart_empty.png": (10, 9),
+    "player_idle.png": (16, 24),
+    "player_walk1.png": (16, 24),
+    "player_walk2.png": (16, 24),
+    "slime_0.png": (16, 16),
+    "slime_1.png": (16, 16),
+    "shade_0.png": (16, 32),
+    "shade_1.png": (16, 32),
+    "bat_0.png": (16, 16),
+    "bat_1.png": (16, 16),
+    "skeleton_0.png": (16, 24),
+    "skeleton_1.png": (16, 24),
+    "sword.png": (16, 16),
+    "heart_full.png": (16, 16),
+    "heart_empty.png": (16, 16),
 }
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"

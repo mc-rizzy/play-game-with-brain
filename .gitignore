@@ -3,3 +3,4 @@ __pycache__/
 *.py[cod]
 game/ai_input.json
 .DS_Store
+.env

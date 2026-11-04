@@ -7,10 +7,15 @@ from game.config import (
     TILE, WORLD_W, WORLD_H, DAY_LENGTH, GRAVITY, REACH,
     WINDOWED_SIZE, PLAYER_SPEED, PLAYER_SWIM_SPEED, PLAYER_JUMP,
     MAX_PARTICLES, UI_BASE_W, UI_BASE_H, UI_MIN_SCALE, UI_MAX_SCALE,
+    SUBCELLS, DROPS_PER_SUB, LIGHT_LEVELS, WATER_TICK_DT,
 )
 from game.tiles import *
-from game.sprites import make_sprites, make_water_frames, make_entity_sprites
-from game.world import World
+from game.sprites import (
+    make_sprites, make_water_frames, make_entity_sprites,
+    make_still_water,
+    SUN_MAP, CLOUD_MAPS, paint_map, moon_surface,
+)
+from game.world import World, W2
 from game.lighting import Lighting
 from game.entities import Player, Enemy, move_collide
 from game.utils import lerp_col, sky_and_daylight
@@ -43,6 +48,15 @@ class Game:
         self.light.update_display(10.0)
 
         self.water_frames = make_water_frames()
+        self.water_still = pygame.transform.scale(
+            make_still_water(), (TILE, TILE))
+        # Celestial art shares the tiles' 5px cells; the moon never
+        # tints so it builds once, sun/clouds rebuild on light bands.
+        self._moon_art = pygame.transform.scale(moon_surface(), (80, 80))
+        self._sky_key = None
+        self._sun_art = None
+        self._cloud_near = []
+        self._cloud_far = []
         self.visible = (0, 0, 0, 0)
         self._text_cache = {}
         self._swing_cache = None
@@ -62,24 +76,29 @@ class Game:
             self.player.rect.centery - self.H / 2,
         )
 
+        # Survival start: empty pockets, only the starter sword
+        # equipped. Everything else must be mined or crafted.
         self.inv = {
-            WOOD: 5,
+            WOOD: 0,
             DIRT: 0,
             STONE: 0,
             COAL: 0,
             IRON: 0,
             GOLD: 0,
             SAND: 0,
-            PLANKS: 4,
+            GRASS: 0,
+            LEAVES: 0,
+            TALLGRASS: 0,
+            PLANKS: 0,
             BRICK: 0,
             GLASS: 0,
-            TORCH: 3,
+            TORCH: 0,
             LANTERN: 0,
             FLOWER: 0,
             SWORD: 1,
         }
 
-        self.slot = 6
+        self.slot = HOTBAR.index(SWORD)
         self.craft_open = False
 
         self.tod = 0.32
@@ -93,6 +112,7 @@ class Game:
 
         self.mine_target = None
         self.mine_prog = 0.0
+        self._water_t = 0.0
 
         self.clouds = [
             (
@@ -116,6 +136,7 @@ class Game:
         self.light_tile_surface = None
         self.light_screen_surface = None
         self._light_cache_key = None
+        self._light_palette = None
 
     # ------------------------------------------------------------ display
 
@@ -144,30 +165,49 @@ class Game:
         scale = min(self.W / UI_BASE_W, self.H / UI_BASE_H)
         self.ui_scale = max(UI_MIN_SCALE, min(UI_MAX_SCALE, scale))
         s = self.ui_scale
-        self.font = pygame.font.SysFont("consolas", max(17, int(17 * s)))
-        self.big = pygame.font.SysFont("consolas", max(26, int(26 * s)),
-                                       bold=True)
+        # Built-in font reads as a game UI font; consolas looked like a
+        # code editor. Sizes tuned so normal/big stay crisp at 1x-2x.
+        self.font = pygame.font.Font(None, max(20, int(24 * s)))
+        self.big = pygame.font.Font(None, max(28, int(34 * s)))
         self._text_cache = {}
         self._heart_cache = {}
-        # Scaled hotbar metrics.
-        self.slot_size = int(54 * s)
-        self.slot_inner = int(50 * s)
-        self.icon_size = int(38 * s)
-        heart_w = max(20, int(20 * s))
-        self.heart_size = (heart_w, max(18, int(heart_w * 0.9)))
+        # Hearts crop the 10x9 core out of the 16x16 PNG, then scale by
+        # an integer factor (2x at 1280x720, 3x at 1080p, ...).
+        heart_mult = max(2, int(round(2 * s)))
+        self.heart_size = (10 * heart_mult, 9 * heart_mult)
+        # Integer multiples of the 16px art so icons stay crisp.
+        icon_mult = max(2, int(round(38 * s / 16)))
+        self.icon_size = 16 * icon_mult
+        # Scaled hotbar metrics (Terraria-style top-left bar), shrunk
+        # to clear the hearts panel on narrow windows.
+        reserve = 10 * self.heart_size[0] + int(60 * s)
+        fit = (self.W - int(14 * s) - reserve) // len(HOTBAR)
+        self.slot_size = max(int(36 * s), min(int(54 * s), fit))
+        self.slot_inner = self.slot_size - max(2, int(4 * s))
 
     def refresh_icons(self):
         if not hasattr(self, "icon_size"):
             return
+        # Build icons from the 16px source art with integer scaling so
+        # they stay crisp (downscaling the 80px tile sprites blurs).
+        import random as _random
+        from game.sprites import make_small_tile
         size = self.icon_size
-        self.icons = {
-            item: pygame.transform.scale(self.sprites[item][0], (size, size))
-            for item in HOTBAR
-            if item != SWORD
-        }
+        icons = {}
+        for item in HOTBAR:
+            if item == SWORD:
+                continue
+            rng = _random.Random(item * 1000)
+            small = make_small_tile(item, rng)
+            icons[item] = pygame.transform.scale(small, (size, size))
         sword = self.entity.get("sword")
         if sword is not None:
-            self.icons[SWORD] = pygame.transform.scale(sword, (size, size))
+            try:
+                icons[SWORD] = pygame.transform.scale(sword, (size, size))
+            except Exception:
+                icons[SWORD] = pygame.transform.scale(
+                    self.sprites[WOOD][0], (size, size))
+        self.icons = icons
 
     def text(self, content, colour, big=False):
         """Cached font rendering (avoids re-rendering every frame)."""
@@ -190,8 +230,20 @@ class Game:
             int((my + self.cam.y) // TILE),
         )
 
-    def invalidate_light(self):
-        self.light.mark_dirty()
+    def water_tile_animated(self, tx, ty):
+        """Only SURFACE water the player wades through animates: a
+        wet tile with no water above it that the player overlaps.
+        Water under water, and water away from the player, is still."""
+        if not (0 <= tx < WORLD_W and 0 <= ty < WORLD_H):
+            return False
+        wtc = self.world.wtc
+        if not wtc[ty * WORLD_W + tx]:
+            return False
+        if ty > 0 and wtc[(ty - 1) * WORLD_W + tx]:
+            return False
+        r = self.player.rect
+        return (r.left // TILE <= tx <= (r.right - 1) // TILE
+                and r.top // TILE <= ty <= (r.bottom - 1) // TILE)
 
     def try_craft(self, recipe):
         name, result, count, cost = recipe
@@ -221,15 +273,23 @@ class Game:
             )
 
     def attack(self):
+        # Blocks don't deal damage: only the sword swings and hits.
+        if HOTBAR[self.slot] != SWORD:
+            return
         player = self.player
         player.swing = 0.22
 
-        damage = 3 if HOTBAR[self.slot] == SWORD else 1
+        damage = 3
+        # Frontal arc at torso height: a full tile of reach ahead.
+        if player.face > 0:
+            hx = player.rect.right
+        else:
+            hx = player.rect.left - 96
         hitbox = pygame.Rect(
-            player.rect.centerx + player.face * 24 - 28,
-            player.rect.y - 5,
-            56,
-            54,
+            hx,
+            player.rect.centery - 40,
+            96,
+            80,
         )
 
         for enemy in self.enemies:
@@ -259,8 +319,8 @@ class Game:
 
         _, _, self.daylight = sky_and_daylight(self.tod)
 
-        # Lighting internally ignores calls unless sunlight changed
-        # by one full light level or a block changed.
+        # Sun intensity is continuous (render-side); the torch flood
+        # advances one budgeted physics step every frame.
         self.light.compute(self.daylight)
         self.light.update_display(dt)
 
@@ -284,9 +344,8 @@ class Game:
         jump = merged["jump"]
         self._ai_discrete(ai)
 
-        player_tile_x = player.rect.centerx // TILE
-        player_tile_y = player.rect.centery // TILE
-        in_water = world.get(player_tile_x, player_tile_y) == WATER
+        in_water = world.water_at_pixel(player.rect.centerx,
+                                       player.rect.centery)
 
         player.vel.x = move * (
             PLAYER_SWIM_SPEED if in_water else PLAYER_SPEED
@@ -297,8 +356,12 @@ class Game:
             player.walk += dt * 9
 
         if in_water:
+            head_out = not world.water_at_pixel(
+                player.rect.centerx, player.rect.top + 2)
             if jump:
-                player.vel.y = -240
+                # Breach: head out means a full jump clean onto the
+                # shore; fully submerged, swim up hard instead.
+                player.vel.y = PLAYER_JUMP if head_out else -320
             player.vel.y += GRAVITY * 0.22 * dt
             player.vel.y = min(player.vel.y, 145)
         else:
@@ -316,6 +379,7 @@ class Game:
 
         self.update_mining(dt)
         self.update_enemies(dt)
+        self.update_water(dt)
 
         for particle in list(self.particles):
             particle[0] += particle[2] * dt
@@ -360,6 +424,47 @@ class Game:
         for key in prev:
             prev[key] = bool(ai.get(key))
 
+    def run_calibration_wizard(self):
+        """Embedded 15 s Calibration Wizard (C key).
+
+        Replays local EEG trials when available, else demo data; adapts
+        the GNN head to this player, asks Muse to tune the live gates,
+        and saves adapter.pt for the live bridge. ESC skips.
+        """
+        import os
+        try:
+            from game.calibrate import run_wizard
+            from gnn.recordings import find_trials
+        except Exception as exc:
+            self.msg = f"Calibration unavailable: {exc}"
+            self.msg_t = 5.0
+            return
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        data = os.path.join(root, "EEG_recordings")
+        out = os.path.join(root, "gnn", "checkpoints")
+        model_path = os.path.join(out, "model.pt")
+        try:
+            source = "replay" if find_trials(data) else "demo"
+        except Exception:
+            source = "demo"
+        try:
+            result = run_wizard(
+                self.screen, source=source,
+                model_path=(model_path
+                            if os.path.exists(model_path) else None),
+                data=data, out_dir=out)
+        except Exception as exc:
+            self.msg = f"Calibration failed: {exc}"
+            self.msg_t = 5.0
+            return
+        if result is None:
+            self.msg = "Calibration skipped."
+            self.msg_t = 4.0
+        else:
+            self.msg = f"Calibrated! {result['muse'].get('verdict', '')}"
+            self.msg_t = 8.0
+        self.clock.tick()  # drop wizard time so the next dt stays small
+
     def quick_torch(self):
         tile_x, tile_y = self.mouse_tile()
         if (
@@ -368,7 +473,6 @@ class Game:
         ):
             self.world.set(tile_x, tile_y, TORCH)
             self.inv[TORCH] -= 1
-            self.invalidate_light()
 
     def update_mining(self, dt):
         if self.craft_open or not pygame.mouse.get_pressed()[0]:
@@ -391,6 +495,13 @@ class Game:
             self.mine_prog = 0.0
             return
 
+        if TILE_DEFS[tile][3] >= 1000:
+            # Unmineable (water, bedrock): no target, no cracks, no
+            # progress bar that could never finish.
+            self.mine_target = None
+            self.mine_prog = 0.0
+            return
+
         if (tile_x, tile_y) != self.mine_target:
             self.mine_target = (tile_x, tile_y)
             self.mine_prog = 0.0
@@ -401,7 +512,6 @@ class Game:
         if self.mine_prog >= hardness and hardness < 1000:
             self.world.set(tile_x, tile_y, AIR)
             self.inv[tile] = self.inv.get(tile, 0) + 1
-            self.invalidate_light()
 
             self.spawn_particles(
                 tile_x * TILE + TILE // 2,
@@ -412,6 +522,15 @@ class Game:
 
             self.mine_target = None
             self.mine_prog = 0.0
+
+    def update_water(self, dt):
+        # Unconditional physics: the flow sim ticks on a fixed clock,
+        # no sleep flags, no lazy wakeups.
+        self._water_t -= dt
+        if self._water_t > 0:
+            return
+        self._water_t = WATER_TICK_DT
+        self.world.water_tick()
 
     def update_enemies(self, dt):
         player = self.player
@@ -428,11 +547,31 @@ class Game:
                 player.rect.centerx + side * random.uniform(650, 850)
             )
             tile_x = max(2, min(WORLD_W - 3, spawn_px // TILE))
+            ptx = max(0, min(WORLD_W - 1,
+                             player.rect.centerx // TILE))
+            deep = (player.rect.centery // TILE
+                    > world.surface[ptx] + 8)
+
+            spawn_ty = world.surface[tile_x] - 2
+            if night:
+                kind = "bat" if random.random() < 0.4 else "shade"
+            elif deep:
+                kind = "bat" if random.random() < 0.7 else "shade"
+                py = max(2, min(WORLD_H - 4,
+                                player.rect.centery // TILE))
+                for cand in range(py, 1, -1):
+                    if (world.get(tile_x, cand) == AIR
+                            and world.get(tile_x, cand + 1) == AIR):
+                        spawn_ty = cand
+                        break
+            else:
+                kind = ("skeleton" if random.random() < 0.3
+                        else "slime")
 
             self.enemies.append(Enemy(
                 tile_x * TILE,
-                (world.surface[tile_x] - 2) * TILE,
-                "shade" if night else "slime",
+                spawn_ty * TILE,
+                kind,
             ))
 
         for enemy in list(self.enemies):
@@ -440,7 +579,8 @@ class Game:
 
             if enemy.hp <= 0:
                 self.enemies.remove(enemy)
-                drop = COAL if enemy.kind == "shade" else FLOWER
+                drop = (COAL if enemy.kind in ("shade", "skeleton")
+                        else FLOWER)
                 self.inv[drop] = self.inv.get(drop, 0) + 1
 
                 self.texts.append(
@@ -515,16 +655,10 @@ class Game:
 
     def draw_world(self):
         self.screen.blit(self.get_sky_surface(), (0, 0))
-
-        if self.daylight < 0.45:
-            star_colour = (225, 232, 255)
-            for sx, sy in self.stars:
-                self.screen.fill(
-                    star_colour,
-                    (sx * self.W, sy * self.H, 3, 3),
-                )
-
-        self.draw_sun_and_moon()
+        # Clouds hang behind the terrain and take the night dimming
+        # like everything else; the sun, moon and stars are light
+        # sources, so they draw after the lighting overlay and punch
+        # through the dark.
         self.draw_clouds()
 
         x0 = max(0, int(self.cam.x // TILE))
@@ -537,9 +671,6 @@ class Game:
         screen = self.screen
         camx, camy = self.cam.x, self.cam.y
         self.visible = (x0, y0, x1, y1)
-        soil_back = (48, 40, 48)
-        air_gadgets = (TORCH, LANTERN, FLOWER, TALLGRASS)
-
         for ty in range(y0, y1):
             row_y = ty * TILE - camy
             for tx in range(x0, x1):
@@ -547,85 +678,175 @@ class Game:
                 sx = int(tx * TILE - camx)
                 sy = int(row_y)
 
-                underground = ty > world.surface[tx]
-
                 if tile == AIR:
-                    if underground:
-                        screen.fill(soil_back, (sx, sy, TILE, TILE))
+                    # Air is air: dug-out cells blend with the sky
+                    # background, and the lighting overlay shades them
+                    # by depth like everything else. Wet cells read as
+                    # AIR here; water draws over them later in
+                    # draw_foreground.
                     continue
-
-                if tile == WATER:
-                    continue   # drawn later, over entities
-
-                if underground and tile in air_gadgets:
-                    screen.fill(soil_back, (sx, sy, TILE, TILE))
 
                 screen.blit(sprites[tile][(tx + ty) & 1], (sx, sy))
 
         self.draw_mining_cracks()
         self.draw_lighting(x0, y0, x1, y1)
+        self.draw_stars()
+        self.draw_sun_and_moon()
 
     def draw_foreground(self):
         x0, y0, x1, y1 = self.visible
         frame = (pygame.time.get_ticks() // 220) % 4
+        ws = self.world.ws
+        wtc = self.world.wtc
+        half = TILE // SUBCELLS
+        half_max = SUBCELLS * DROPS_PER_SUB
 
         for ty in range(y0, y1):
             for tx in range(x0, x1):
-                if self.world.g[tx][ty] == WATER:
-                    img = self.water_frames[(frame + tx) % 4]  # phase offset per column
-                    self.screen.blit(img, (int(tx * TILE - self.cam.x),
-                                        int(ty * TILE - self.cam.y)))
+                if not wtc[ty * WORLD_W + tx]:
+                    continue
+                if self.water_tile_animated(tx, ty):
+                    # Phase offset per column for the water the
+                    # player is moving through.
+                    img = self.water_frames[(frame + tx) % 4]
+                else:
+                    img = self.water_still
+                sx = int(tx * TILE - self.cam.x)
+                sy = int(ty * TILE - self.cam.y)
+                # Staircase halves: each half-column renders its drop
+                # count bottom-aligned (~1.5px steps, buttery smooth).
+                top = (ty * SUBCELLS) * W2 + tx * SUBCELLS
+                bot = top + W2
+                for dx in range(SUBCELLS):
+                    drops = ws[top + dx] + ws[bot + dx]
+                    if not drops:
+                        continue
+                    h = max(1, drops * TILE // half_max)
+                    self.screen.blit(img, (sx + dx * half, sy + TILE - h),
+                                     (dx * half, TILE - h, half, h))
+
+    def _refresh_sky_art(self):
+        """Rebuild tinted sun/cloud art when the light band changes."""
+        day = self.daylight
+        angle = (self.tod - 0.25) * 2 * math.pi
+        low = max(0.0, min(1.0, 1.0 - math.sin(angle) * 1.6))
+        key = (int(day * 16), int(low * 6))
+        if key == self._sky_key:
+            return
+        self._sky_key = key
+        sun_pal = {
+            "Y": lerp_col((255, 140, 60), (255, 178, 66), 1.0 - low),
+            "M": lerp_col((255, 172, 84), (255, 210, 98), 1.0 - low),
+            "L": lerp_col((255, 208, 130), (255, 240, 170), 1.0 - low),
+        }
+        self._sun_art = pygame.transform.scale(
+            paint_map(SUN_MAP, sun_pal), (80, 80))
+        dusk = max(0.0, 1.0 - abs(day - 0.35) / 0.3)
+        hi = lerp_col((64, 70, 104), (255, 255, 255), day)
+        body = lerp_col((38, 42, 66), (242, 246, 252), day)
+        body = lerp_col((250, 220, 200), body, 1.0 - dusk * 0.25)
+        shade = lerp_col((16, 20, 36), (172, 194, 224), day)
+        shade = lerp_col((236, 172, 142), shade, 1.0 - dusk * 0.55)
+        pal = {"H": hi, "W": body, "S": shade}
+        far_pal = {k: lerp_col(shade, v, 0.7) for k, v in pal.items()}
+        self._cloud_near, self._cloud_far = [], []
+        for shape in CLOUD_MAPS:
+            small = paint_map(shape, pal)
+            w, h = small.get_size()
+            self._cloud_near.append(
+                pygame.transform.scale(small, (w * 5, h * 5)))
+            small = paint_map(shape, far_pal)
+            w, h = small.get_size()
+            self._cloud_far.append(
+                pygame.transform.scale(small, (w * 3, h * 3)))
+
+    def draw_stars(self):
+        if self.daylight >= 0.45:
+            return
+        now = pygame.time.get_ticks() // 350
+        for i, (sx, sy) in enumerate(self.stars):
+            size = 2 if i % 3 == 0 else 3
+            if (i * 13 + now) % 5 == 0:
+                col = (130, 140, 180)
+            else:
+                col = (225, 232, 255)
+            self.screen.fill(
+                col, (sx * self.W, sy * self.H, size, size))
 
     def draw_sun_and_moon(self):
         angle = (self.tod - 0.25) * 2 * math.pi
-
-        for colour, body_angle, radius in (
-            ((255, 222, 110), angle, 34),
-            ((224, 230, 244), angle + math.pi, 27),
-        ):
+        for kind, body_angle in (("sun", angle),
+                                 ("moon", angle + math.pi)):
             if math.sin(body_angle) <= -0.15:
                 continue
+            bx = int(self.W * 0.5
+                     + math.cos(body_angle) * self.W * 0.42)
+            by = int(self.H * 0.62
+                     - abs(math.sin(body_angle)) * self.H * 0.5)
+            if kind == "sun":
+                self._draw_sun(bx, by, body_angle)
+            else:
+                self._draw_moon(bx, by)
 
-            bx = int(self.W * 0.5 + math.cos(body_angle) * self.W * 0.42)
-            by = int(self.H * 0.62 - abs(math.sin(body_angle)) * self.H * 0.5)
+    def _sky_open(self, sx, sy):
+        """True when a screen pixel looks at open sky, not terrain."""
+        tx = int((sx + self.cam.x) // TILE)
+        ty = int((sy + self.cam.y) // TILE)
+        if ty < 0:
+            return True
+        if not (0 <= tx < WORLD_W and 0 <= ty < WORLD_H):
+            return False
+        t = self.world.g[tx][ty]
+        return t == AIR or not TILE_DEFS[t][1]
 
-            # A square-ish pixel sun/moon fits the chunky art direction.
-            pygame.draw.rect(
-                self.screen,
-                colour,
-                (
-                    bx - radius // 2,
-                    by - radius // 2,
-                    radius,
-                    radius,
-                ),
-            )
+    def _blit_sky_clipped(self, surf, cx, cy, cell, flags=0):
+        """Blit centred art cell by cell, skipping cells behind
+        terrain so bodies set and rise behind hills."""
+        w, h = surf.get_size()
+        ox, oy = cx - w // 2, cy - h // 2
+        for gy in range(0, h, cell):
+            for gx in range(0, w, cell):
+                if self._sky_open(ox + gx + cell // 2,
+                                  oy + gy + cell // 2):
+                    self.screen.blit(
+                        surf, (ox + gx, oy + gy),
+                        (gx, gy, min(cell, w - gx), min(cell, h - gy)),
+                        special_flags=flags)
+
+    def _draw_sun(self, bx, by, body_angle):
+        # Low sun burns bigger and oranger; noon sun is tight, warm.
+        low = max(0.0, min(1.0, 1.0 - math.sin(body_angle) * 1.6))
+        halo_col = lerp_col((255, 150, 70), (255, 238, 200),
+                             1.0 - low)
+        for size, alpha in ((140 + int(low * 60), 24 + int(low * 30)),
+                            (96 + int(low * 30), 32 + int(low * 34))):
+            # Premultiplied add-glow: BLEND_ADD ignores per-pixel
+            # alpha, so the falloff is baked into the colour.
+            k = alpha / 255
+            halo = pygame.Surface((size, size))
+            halo.fill((int(halo_col[0] * k), int(halo_col[1] * k),
+                       int(halo_col[2] * k)))
+            self._blit_sky_clipped(halo, bx, by, 14,
+                                   flags=pygame.BLEND_ADD)
+        self._blit_sky_clipped(self._sun_art, bx, by, 5)
+
+    def _draw_moon(self, bx, by):
+        halo = pygame.Surface((96, 96))
+        halo.fill((18, 19, 23))  # premultiplied faint moonglow
+        self._blit_sky_clipped(halo, bx, by, 14,
+                               flags=pygame.BLEND_ADD)
+        self._blit_sky_clipped(self._moon_art, bx, by, 5)
 
     def draw_clouds(self):
-        colour = lerp_col(
-            (38, 42, 66),
-            (245, 248, 252),
-            self.daylight,
-        )
+        self._refresh_sky_art()
         now = pygame.time.get_ticks() * 0.001
-
-        for cloud_x, cloud_y, speed in self.clouds:
-            x = int(
-                (cloud_x + now * speed - self.cam.x * 0.22)
-                % (self.W + 280)
-                - 140
-            )
-
-            for dx, dy, w, h in (
-                (0, 0, 72, 20),
-                (18, -10, 38, 16),
-                (42, 2, 44, 16),
-            ):
-                pygame.draw.rect(
-                    self.screen,
-                    colour,
-                    (x + dx, cloud_y + dy, w, h),
-                )
+        for i, (cloud_x, cloud_y, speed) in enumerate(self.clouds):
+            near = i % 2 == 0
+            art = self._cloud_near if near else self._cloud_far
+            par = 0.24 if near else 0.14
+            x = int((cloud_x + now * speed - self.cam.x * par)
+                    % (self.W + 280) - 140)
+            self.screen.blit(art[i % len(art)], (x, cloud_y))
 
     def draw_mining_cracks(self):
         if not self.mine_target:
@@ -640,65 +861,95 @@ class Game:
         sx = int(tx * TILE - self.cam.x)
         sy = int(ty * TILE - self.cam.y)
         hardness = max(0.01, TILE_DEFS[tile][3])
-        stages = int(self.mine_prog / hardness * 4)
-
+        stages = min(4, int(self.mine_prog / hardness * 5))
+        # Pixel cracks: chunky stepped blocks + corner progress pips.
+        cell = max(4, TILE // 10)
+        crack_col = (28, 24, 24)
         for i in range(stages + 1):
-            offset = 6 + i * 9
-            pygame.draw.line(
-                self.screen,
-                (28, 24, 24),
-                (sx + offset, sy + 7),
-                (sx + offset + 7, sy + 34),
-                3,
-            )
+            ox = (i * 37) % (TILE - cell * 2)
+            oy = (i * 53) % (TILE - cell * 3)
+            self.screen.fill(crack_col,
+                             (sx + ox, sy + oy, cell, cell))
+            self.screen.fill(crack_col,
+                             (sx + ox + cell // 2, sy + oy + cell,
+                              cell, cell))
+        # Progress pips along the bottom edge.
+        pip_w = TILE // 5
+        for i in range(5):
+            col = (255, 220, 120) if i <= stages else (40, 36, 44)
+            self.screen.fill(col, (sx + i * pip_w + 2, sy + TILE - 6,
+                                   pip_w - 4, 4))
 
     def draw_lighting(self, x0, y0, x1, y1):
+        # Retro pixel lighting at 2x2 sub-cells per block: hard-edged
+        # half-tile blocks in 64 bands, nearest upscaled (no blending).
+        # Combines analytic sun (scaled by daylight) with torch flood.
         width = x1 - x0
         height = y1 - y0
+        if width <= 0 or height <= 0:
+            return
+        sw, sh = width * SUBCELLS, height * SUBCELLS
 
         if (
             self.light_tile_surface is None
-            or self.light_tile_surface.get_size() != (width + 2, height + 2)
+            or self.light_tile_surface.get_size() != (sw, sh)
         ):
-            # +2 border so the smooth upscale can bleed one tile past
-            # the visible edges without dark seams.
-            self.light_tile_surface = pygame.Surface((width + 2, height + 2))
+            self.light_tile_surface = pygame.Surface((sw, sh))
             self.light_screen_surface = pygame.Surface(
-                ((width + 2) * TILE, (height + 2) * TILE))
+                (width * TILE, height * TILE))
             self._light_cache_key = None
 
-        # Rebuild the overlay only when the light changed or we scrolled
-        # to new tiles; camera sub-tile movement just shifts the blit.
+        # Rebuild only when the sim changed, the sun band stepped, or we
+        # scrolled to new tiles; sub-tile camera shifts just move the blit.
+        sun_q = self.light.sunval >> 2
         cache_key = (x0, y0, width, height, self.light.version,
-                     self.light.display_version)
+                     self.light.display_version, sun_q)
         if cache_key != self._light_cache_key:
+            # 64-step palette (minimums prevent pure black).
+            if self._light_palette is None:
+                steps = LIGHT_LEVELS - 1
+                self._light_palette = (
+                    [18 + (lv * 237) // steps
+                     for lv in range(LIGHT_LEVELS)],
+                    [22 + (lv * 233) // steps
+                     for lv in range(LIGHT_LEVELS)],
+                )
+            pal_w, pal_b = self._light_palette
             pixels = pygame.PixelArray(self.light_tile_surface)
 
-            light_r = self.light.dr
-            light_g = self.light.dg
-            light_b = self.light.db
+            sun = self.light.sun
+            lr, lg, lb = self.light.r, self.light.g, self.light.b
+            sv = sun_q << 2
+            top = LIGHT_LEVELS - 1
+            shift = 8 - (LIGHT_LEVELS.bit_length() - 1)
+            cap = top << shift
 
-            # Minimum values prevent pure black; the smooth upscale
-            # blends tile-to-tile instead of hard stepping.
-            for local_y in range(height + 2):
-                world_y = min(WORLD_H - 1, max(0, y0 + local_y - 1))
-                row_offset = world_y * WORLD_W
-
-                for local_x in range(width + 2):
-                    world_x = min(WORLD_W - 1, max(0, x0 + local_x - 1))
-                    i = row_offset + world_x
-
-                    pixels[local_x, local_y] = (
-                        18 + (light_r[i] * 237) // 255,
-                        18 + (light_g[i] * 237) // 255,
-                        22 + (light_b[i] * 233) // 255,
+            for ly in range(sh):
+                sy = (y0 + ly // SUBCELLS) * SUBCELLS + ly % SUBCELLS
+                row = sy * W2
+                sx0 = x0 * SUBCELLS
+                for lx in range(sw):
+                    sx = sx0 + lx
+                    i = row + sx
+                    # Same [1,2,1] lateral blend as sun_smooth().
+                    c = sun[i]
+                    left = sun[i - 1] if sx > 0 else c
+                    right = sun[i + 1] if sx < W2 - 1 else c
+                    s = (((left + (c << 1) + right) >> 2) * sv) // 255
+                    r = s + lr[i]
+                    g = s + lg[i]
+                    b = (s * 96) // 100 + lb[i]
+                    pixels[lx, ly] = (
+                        pal_w[top if r > cap else r >> shift],
+                        pal_w[top if g > cap else g >> shift],
+                        pal_b[top if b > cap else b >> shift],
                     )
 
             del pixels
 
-            # Smooth (bilinear) upscale: soft gradients between tiles
-            # while the underlying data stays tile-based.
-            pygame.transform.smoothscale(
+            # Nearest upscale: crisp hard-edged light cells that match
+            # the pixel art (much faster than smoothscale).
+            pygame.transform.scale(
                 self.light_tile_surface,
                 self.light_screen_surface.get_size(),
                 self.light_screen_surface,
@@ -708,10 +959,10 @@ class Game:
         self.screen.blit(
             self.light_screen_surface,
             (
-                int((x0 - 1) * TILE - self.cam.x),
-                int((y0 - 1) * TILE - self.cam.y),
+                int(x0 * TILE - self.cam.x),
+                int(y0 * TILE - self.cam.y),
             ),
-            special_flags=pygame.BLEND_RGBA_MULT,
+            special_flags=pygame.BLEND_MULT,
         )
 
         self.draw_fireflies()
@@ -742,7 +993,7 @@ class Game:
             y = int(e.rect.y - camy)
             w = e.rect.width
             frame = ((now // 350) + (x // 97)) % 2
-            base = "slime" if e.kind == "slime" else "shade"
+            base = e.kind  # slime/shade/bat/skeleton art keys match
             key = f"{base}_{frame}"
             if e.hurt_t > 0:
                 key += "_flash"
@@ -753,11 +1004,14 @@ class Game:
             else:  # placeholder fallback (assets missing)
                 screen.fill((200, 80, 200), (x, y, w, e.rect.height))
 
-            bar = max(4, TILE // 16)
-            screen.fill((58, 20, 20), (x, y - bar - 3, w, bar))
-            screen.fill((235, 80, 80),
-                        (x, y - bar - 3,
-                         int(w * max(0, e.hp) / e.max_hp), bar))
+            bar = max(5, TILE // 14)
+            bx, by = x, y - bar - 4
+            screen.fill((12, 12, 16), (bx - 1, by - 1, w + 2, bar + 2))
+            screen.fill((58, 20, 20), (bx, by, w, bar))
+            fill = int(w * max(0, e.hp) / e.max_hp)
+            screen.fill((235, 80, 80), (bx, by, fill, bar))
+            if fill > 2:
+                screen.fill((255, 150, 150), (bx, by, fill, max(1, bar // 3)))
 
         # Player pixel art: idle / walk frames, flipped by facing.
         x = int(p.rect.x - camx)
@@ -774,23 +1028,48 @@ class Game:
             key += "_flash"
         img = ent.get(key) or ent.get("player_idle")
         if img is not None:
-            screen.blit(img, (x, y))
+            # Centered + bottom-aligned: art is wider than the hitbox
+            # and feet sit exactly on the rect bottom (the ground).
+            screen.blit(img, (x + (p.rect.width - img.get_width()) // 2,
+                              y + p.rect.height - img.get_height()))
 
-        # Sword swing: pixel-art blade sweeping an arc.
+        # Sword swing: the blade orbits the hand through a frontal
+        # arc at torso height (matching the hitbox), trailing a white
+        # slash streak. The hilt stays at the hand and the tip reach
+        # (~90px) matches the 96px hitbox depth.
         if p.swing > 0 and HOTBAR[self.slot] == SWORD:
             sword = ent.get("sword")
             if sword is not None:
                 if self._swing_cache is None:
-                    size = max(24, int(TILE * 0.7))
                     self._swing_cache = pygame.transform.scale(
-                        sword, (size, size))
+                        sword, (96, 96))
+                fore = 1 if p.face > 0 else -1
                 progress = 1.0 - p.swing / 0.22  # 0 -> 1
-                angle = (-70 + 140 * progress) * p.face
-                blade = pygame.transform.rotate(self._swing_cache, angle)
-                hx = x + (p.rect.width if p.face > 0 else 0)
-                screen.blit(blade, (int(hx - blade.get_width() // 2
-                                        + p.face * TILE * 0.25),
-                                    int(y + p.rect.height * 0.15)))
+                sw = math.radians(-70 + 140 * progress)
+                hand_x = x + (p.rect.width if p.face > 0 else 0)
+                hand_y = y + int(p.rect.height * 0.45)
+                reach = 48
+                dx, dy = fore * math.cos(sw), math.sin(sw)
+                bx = hand_x + dx * reach
+                by = hand_y + dy * reach
+                # Blade points along the radius, like an arm extension.
+                # The art's tip sits 30.3 deg clockwise from straight
+                # up, so subtract the native tilt to land on target.
+                phi = math.degrees(math.atan2(dx, -dy))
+                blade = pygame.transform.rotate(
+                    self._swing_cache, 30.3 - phi)
+                screen.blit(blade, (int(bx - blade.get_width() // 2),
+                                    int(by - blade.get_height() // 2)))
+                # Slash streak: fading ticks along the swept arc.
+                for k, col in ((1, (240, 244, 252)),
+                               (2, (200, 210, 228)),
+                               (3, (160, 170, 190))):
+                    ta = sw - k * 0.16
+                    if ta < math.radians(-70):
+                        continue
+                    tx = hand_x + fore * math.cos(ta) * reach
+                    ty = hand_y + math.sin(ta) * reach
+                    screen.fill(col, (int(tx - 3), int(ty - 3), 6, 6))
 
         for pt in self.particles:
             screen.fill(pt[5], (int(pt[0] - camx), int(pt[1] - camy), 6, 6))
@@ -806,121 +1085,214 @@ class Game:
         if cached is None:
             src = self.entity.get(
                 "heart_full" if full else "heart_empty")
-            cached = pygame.transform.scale(src, self.heart_size)
+            # Crop the 10x9 heart core out of the 16x16 PNG (3px padding
+            # on each side) so the icon scales by an integer factor.
+            try:
+                core = src.subsurface(pygame.Rect(3, 3, 10, 9))
+            except Exception:
+                core = src
+            cached = pygame.transform.scale(core, self.heart_size)
             self._heart_cache[key] = cached
         return cached
 
-    def draw_ui(self):
-        player = self.player
+    def draw_panel(self, rect, bg=(16, 20, 32, 220), border=(0, 0, 0),
+                   bevel_light=(90, 100, 128), bevel_dark=(8, 10, 18)):
+        """Pixel-style panel: flat bg, black border, 1px bevel."""
         s = self.ui_scale
-        margin = int(20 * s)
+        b = max(1, int(2 * s))
+        panel = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
+        panel.fill(bg)
+        w, h = rect.width, rect.height
+        # Bevel: light top/left, dark bottom/right.
+        panel.fill(bevel_light, (0, 0, w, b))
+        panel.fill(bevel_light, (0, 0, b, h))
+        panel.fill(bevel_dark, (0, h - b, w, b))
+        panel.fill(bevel_dark, (w - b, 0, b, h))
+        pygame.draw.rect(panel, border, panel.get_rect(), max(1, b // 2))
+        self.screen.blit(panel, rect.topleft)
+        return rect
 
-        hw, hh = self.heart_size
-        gap = max(4, int(7 * s))
-        for i in range(player.max_hp):
-            self.screen.blit(self.heart_icon(i < player.hp),
-                             (margin + i * (hw + gap), int(14 * s)))
+    def blit_text_shadow(self, content, colour, pos, big=False,
+                         shadow=(10, 10, 16)):
+        s = self.ui_scale
+        off = max(1, int(2 * s))
+        self.screen.blit(self.text(content, shadow, big=big),
+                         (pos[0] + off, pos[1] + off))
+        self.screen.blit(self.text(content, colour, big=big), pos)
 
-        hours = int(((self.tod - 0.25) % 1.0) * 24)
-        minutes = int((self.tod * 1440) % 60)
-        sun_or_moon = "SUN" if self.daylight > 0.4 else "MOON"
-
-        clock_text = (
-            f"Day {self.day}  {sun_or_moon}  "
-            f"{hours:02d}:{minutes:02d}"
-        )
-        self.screen.blit(
-            self.text(clock_text, (255, 255, 238)),
-            (margin, int(14 * s) + hh + int(6 * s)),
-        )
-
-        if self.msg_t > 0:
-            text = self.text(self.msg, (255, 248, 220), big=True)
-            pad_x, pad_y = int(14 * s), int(8 * s)
-            box = pygame.Rect(
-                int(self.W / 2 - text.get_width() / 2 - pad_x),
-                int(52 * s),
-                text.get_width() + pad_x * 2,
-                text.get_height() + pad_y * 2,
-            )
-            pygame.draw.rect(
-                self.screen, (18, 22, 36), box,
-                border_radius=max(4, int(8 * s)),
-            )
-            self.screen.blit(
-                text, (int(self.W / 2 - text.get_width() / 2),
-                       box.y + pad_y),
-            )
-
+    def draw_ui(self):
+        # Terraria layout: inventory top-left, hearts top-right.
         self.draw_hotbar()
+        self.draw_hearts_and_clock()
+        self.draw_message()
+        self.draw_help()
 
         if self.craft_open:
             self.draw_craft()
 
-    def draw_hotbar(self):
+    def draw_hearts_and_clock(self):
+        player = self.player
         s = self.ui_scale
-        slot_size = self.slot_size
-        inner = self.slot_inner
-        total_width = len(HOTBAR) * slot_size
-        start_x = int(self.W / 2 - total_width / 2)
-        help_h = self.font.get_height() + int(8 * s)
-        y = self.H - inner - help_h - int(8 * s)
-        pad = (inner - self.icon_size) // 2
+        margin = int(14 * s)
 
-        for i, item in enumerate(HOTBAR):
-            rect = pygame.Rect(
-                start_x + i * slot_size, y, inner, inner
-            )
+        hw, hh = self.heart_size
+        gap = max(3, int(5 * s))
+        total_w = player.max_hp * hw + (player.max_hp - 1) * gap
+        # Panel behind the hearts so they read over bright skies.
+        pad = int(8 * s)
+        panel = pygame.Rect(
+            self.W - margin - total_w - pad * 2,
+            margin,
+            total_w + pad * 2,
+            hh + pad * 2,
+        )
+        self.draw_panel(panel)
+        x = panel.x + pad
+        y = panel.y + pad
+        for i in range(player.max_hp):
+            self.screen.blit(self.heart_icon(i < player.hp),
+                             (x + i * (hw + gap), y))
 
-            pygame.draw.rect(
-                self.screen, (16, 20, 32), rect,
-                border_radius=max(3, int(5 * s)),
-            )
-            pygame.draw.rect(
-                self.screen,
-                (255, 220, 120)
-                if i == self.slot
-                else (115, 124, 146),
-                rect,
-                max(2, int(3 * s)) if i == self.slot else 1,
-                border_radius=max(3, int(5 * s)),
-            )
+        hours = int(((self.tod - 0.25) % 1.0) * 24)
+        minutes = int((self.tod * 1440) % 60)
+        is_day = self.daylight > 0.4
+        clock_text = f"Day {self.day}  {hours:02d}:{minutes:02d}"
+        icon_col = (255, 214, 90) if is_day else (190, 200, 230)
+        label = self.text(clock_text, (245, 245, 235))
+        icon_side = max(8, int(14 * s))
+        clock_pad = int(8 * s)
+        clock_w = icon_side + int(8 * s) + label.get_width() + clock_pad * 2
+        clock_h = max(label.get_height(), icon_side) + clock_pad * 2
+        clock = pygame.Rect(
+            self.W - margin - clock_w,
+            panel.bottom + int(8 * s),
+            clock_w,
+            clock_h,
+        )
+        self.draw_panel(clock)
+        ix = clock.x + clock_pad
+        iy = clock.y + (clock_h - icon_side) // 2
+        # Pixel sun/moon icon: solid square with a darker core.
+        self.screen.fill(icon_col, (ix, iy, icon_side, icon_side))
+        inner = max(2, icon_side // 3)
+        inset = (icon_side - inner) // 2
+        self.screen.fill((40, 40, 50) if not is_day else (255, 240, 180),
+                         (ix + inset, iy + inset, inner, inner))
+        self.screen.blit(label, (ix + icon_side + int(8 * s),
+                                 clock.y + (clock_h - label.get_height()) // 2))
 
-            icon = self.icons.get(item)
-            if icon is not None:
-                self.screen.blit(icon, (rect.x + pad, rect.y + pad))
+    def draw_message(self):
+        if self.msg_t <= 0:
+            return
+        s = self.ui_scale
+        text = self.text(self.msg, (255, 248, 220), big=True)
+        pad_x, pad_y = int(14 * s), int(9 * s)
+        box = pygame.Rect(
+            int(self.W / 2 - text.get_width() / 2 - pad_x),
+            int(86 * s),
+            text.get_width() + pad_x * 2,
+            text.get_height() + pad_y * 2,
+        )
+        self.draw_panel(box, bg=(18, 22, 36, 230),
+                        border=(255, 210, 130))
+        self.screen.blit(
+            text, (int(self.W / 2 - text.get_width() / 2),
+                   box.y + pad_y),
+        )
 
-            count = self.inv.get(item, 0)
-            if item != SWORD and count:
-                text = self.text(str(count), (255, 255, 255))
-                self.screen.blit(
-                    text, (rect.right - text.get_width() - int(5 * s),
-                           rect.bottom - text.get_height() - int(3 * s)),
-                )
-
-            number = self.text(str(i + 1), (190, 200, 215))
-            self.screen.blit(number, (rect.x + int(4 * s),
-                                      rect.y + int(3 * s)))
-
+    def draw_help(self):
+        s = self.ui_scale
         tile_x, tile_y = self.mouse_tile()
         hovered = self.world.get(tile_x, tile_y)
-
         selected = (
             TILE_DEFS[hovered][0]
             if hovered != AIR
             else ITEM_NAMES[HOTBAR[self.slot]]
         )
-
         help_text = (
-            f"{selected}  -  E: Craft  F: Torch  "
-            f"F11: Fullscreen  LMB: Mine/Attack  RMB: Place"
+            f"{selected}   |   E: Craft   F: Torch   C: Calibrate brain   "
+            f"F11: Fullscreen   LMB: Mine/Attack   RMB: Place"
         )
         rendered = self.text(help_text, (228, 234, 244))
-        self.screen.blit(
-            rendered,
-            (int(self.W / 2 - rendered.get_width() / 2),
-             self.H - help_h + int(2 * s)),
+        pad_x, pad_y = int(10 * s), int(5 * s)
+        box = pygame.Rect(
+            int(self.W / 2 - rendered.get_width() / 2 - pad_x),
+            self.H - rendered.get_height() - pad_y * 2 - int(10 * s),
+            rendered.get_width() + pad_x * 2,
+            rendered.get_height() + pad_y * 2,
         )
+        self.draw_panel(box, bg=(10, 14, 24, 170))
+        self.screen.blit(rendered, (box.x + pad_x, box.y + pad_y))
+
+    def draw_hotbar(self):
+        # Terraria-style: inventory bar pinned to the top-left.
+        s = self.ui_scale
+        slot_size = self.slot_size
+        inner = self.slot_inner
+        margin = int(14 * s)
+        start_x = margin
+        y = margin
+        pad = (inner - self.icon_size) // 2
+        bw = max(2, int(3 * s))
+
+        for i, item in enumerate(HOTBAR):
+            rect = pygame.Rect(
+                start_x + i * slot_size, y, inner, inner
+            )
+            selected = (i == self.slot)
+
+            # Slot body + bevel.
+            self.screen.fill((16, 20, 32), rect)
+            b = max(1, int(2 * s))
+            self.screen.fill((90, 100, 128), (rect.x, rect.y, rect.w, b))
+            self.screen.fill((90, 100, 128), (rect.x, rect.y, b, rect.h))
+            self.screen.fill((8, 10, 18),
+                             (rect.x, rect.bottom - b, rect.w, b))
+            self.screen.fill((8, 10, 18),
+                             (rect.right - b, rect.y, b, rect.h))
+            if selected:
+                # Gold selection frame + subtle bright wash.
+                wash = pygame.Surface((inner, inner), pygame.SRCALPHA)
+                wash.fill((255, 220, 120, 28))
+                self.screen.blit(wash, rect.topleft)
+                pygame.draw.rect(self.screen, (255, 220, 120), rect, bw)
+                # Corner ticks make the selection read at a glance.
+                tick = max(4, int(8 * s))
+                for cx, cy in ((rect.x, rect.y),
+                               (rect.right - tick, rect.y),
+                               (rect.x, rect.bottom - tick),
+                               (rect.right - tick, rect.bottom - tick)):
+                    self.screen.fill((255, 240, 190), (cx, cy, tick, max(2, b)))
+            else:
+                pygame.draw.rect(self.screen, (70, 76, 96), rect, 1)
+
+            count = self.inv.get(item, 0)
+            icon = self.icons.get(item)
+            # Empty slots stay empty; the equipped sword always shows.
+            if icon is not None and (item == SWORD or count > 0):
+                self.screen.blit(icon, (rect.x + pad, rect.y + pad))
+
+            if item != SWORD and count:
+                self.blit_text_shadow(
+                    str(count), (255, 255, 255),
+                    (rect.right - self.text(str(count), (255, 255, 255)).get_width() - int(5 * s),
+                     rect.bottom - self.text(str(count), (255, 255, 255)).get_height() - int(3 * s)))
+
+            number = self.text(str(i + 1), (190, 200, 215))
+            self.screen.blit(number, (rect.x + int(4 * s),
+                                      rect.y + int(2 * s)))
+
+        # Selected-item label under the bar.
+        label = ITEM_NAMES[HOTBAR[self.slot]]
+        rendered = self.text(label, (255, 240, 200))
+        pad_x, pad_y = int(10 * s), int(4 * s)
+        box = pygame.Rect(
+            margin, y + inner + int(8 * s),
+            rendered.get_width() + pad_x * 2,
+            rendered.get_height() + pad_y * 2,
+        )
+        self.draw_panel(box, bg=(10, 14, 24, 190))
+        self.screen.blit(rendered, (box.x + pad_x, box.y + pad_y))
 
     def draw_craft(self):
         s = self.ui_scale
@@ -938,18 +1310,11 @@ class Game:
             panel_h,
         )
 
-        pygame.draw.rect(
-            self.screen, (22, 26, 42), panel,
-            border_radius=max(6, int(12 * s)),
-        )
-        pygame.draw.rect(
-            self.screen, (255, 210, 130), panel, max(2, int(2 * s)),
-            border_radius=max(6, int(12 * s)),
-        )
-        self.screen.blit(
-            self.text("Crafting", (255, 225, 160), big=True),
-            (panel.x + int(24 * s), panel.y + int(16 * s)),
-        )
+        self.draw_panel(panel, bg=(22, 26, 42, 242),
+                        border=(255, 210, 130))
+        self.blit_text_shadow("Crafting", (255, 225, 160),
+                              (panel.x + int(24 * s), panel.y + int(16 * s)),
+                              big=True)
 
         self.craft_rects = []
         y = panel.y + title_h
@@ -964,12 +1329,14 @@ class Game:
                 panel.x + int(22 * s), y,
                 panel.w - int(44 * s), row_h,
             )
+            # Square pixel rows with a left status tick (green/gray).
+            self.screen.fill(
+                (44, 56, 80) if can_craft else (32, 36, 50), rect)
             pygame.draw.rect(
                 self.screen,
-                (44, 56, 80) if can_craft else (32, 36, 50),
-                rect,
-                border_radius=max(4, int(7 * s)),
-            )
+                (120, 200, 140) if can_craft else (70, 74, 90), rect, 1)
+            self.screen.fill((120, 200, 140) if can_craft else (60, 64, 78),
+                             (rect.x, rect.y, max(3, int(5 * s)), rect.h))
 
             cost_text = ", ".join(
                 f"{ITEM_NAMES[k]} x{v} ({self.inv.get(k, 0)})"
@@ -1023,8 +1390,14 @@ class Game:
                 elif pygame.K_1 <= event.key <= pygame.K_9:
                     self.slot = event.key - pygame.K_1
 
+                elif event.key == pygame.K_0:
+                    self.slot = 9
+
                 elif event.key == pygame.K_f:
                     self.quick_torch()
+
+                elif event.key == pygame.K_c:
+                    self.run_calibration_wizard()
 
             elif event.type == pygame.MOUSEWHEEL:
                 self.slot = (self.slot - event.y) % len(HOTBAR)
@@ -1070,7 +1443,6 @@ class Game:
 
         self.world.set(tile_x, tile_y, item)
         self.inv[item] -= 1
-        self.invalidate_light()
 
     # ------------------------------------------------------------ main
 

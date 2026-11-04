@@ -26,8 +26,14 @@ TILE_DEFS = {
     TALLGRASS:("Tall Grass",False,False, .05, (90,180,80),   (0,0,0)),
     BEDROCK:  ("Bedrock",  True,  True,  9e9, (50,50,56),    (0,0,0)),
 }
-PLACEABLE = [DIRT, STONE, PLANKS, WOOD, BRICK, GLASS, TORCH, LANTERN, FLOWER]
-HOTBAR    = [DIRT, STONE, PLANKS, WOOD, BRICK, GLASS, TORCH, LANTERN, SWORD]
+# Every mined block lives in the hotbar and places back down: the
+# original nine slots keep their order (and number keys), the rest
+# follow and are reached with the wheel.
+PLACEABLE = [DIRT, STONE, PLANKS, WOOD, BRICK, GLASS, TORCH, LANTERN,
+             FLOWER, GRASS, LEAVES, SAND, COAL, IRON, GOLD, TALLGRASS]
+HOTBAR    = [DIRT, STONE, PLANKS, WOOD, BRICK, GLASS, TORCH, LANTERN,
+             SWORD, GRASS, LEAVES, SAND, COAL, IRON, GOLD, FLOWER,
+             TALLGRASS]
 ITEM_NAMES = {**{k: v[0] for k, v in TILE_DEFS.items()}, SWORD: "Wooden Sword"}
 
 RECIPES = [
@@ -74,7 +80,7 @@ def emitted_light(tile_id):
 
 TILE_LIGHT_FACTOR = {
     GLASS:     0.94,
-    LEAVES:    0.68,
+    LEAVES:    0.85,
     WATER:     0.78,
 
     GRASS:     0.45,

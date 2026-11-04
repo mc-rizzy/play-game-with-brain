@@ -63,6 +63,32 @@ class LiveSource:
             data = data[idx, :]
         return np.ascontiguousarray(data, dtype=np.float64)
 
+    def read_battery(self):
+        """Headset battery percent (None when unavailable)."""
+        try:
+            return int(self._eeg.get_battery())
+        except Exception:
+            return None
+
+    def read_accel(self):
+        """Latest (x, y, z) accelerometer sample in m/s2 (None if absent)."""
+        try:
+            raw = self._eeg.get_mne(tim=0.2, annotations=False)
+            data, _times = raw.get_data(return_times=True)
+            names = raw.info["ch_names"]
+            idx = [names.index(c) for c in ("Accel_x", "Accel_y", "Accel_z")]
+            return tuple(float(v) for v in data[idx, -1])
+        except Exception:
+            return None
+
+    def read_contacts(self, channels=None):
+        """Contact quality is not in the live stream -> None.
+
+        Run the SDK impedance-measurement mode for live contact values;
+        recordings carry contact_* columns instead (see ReplaySource).
+        """
+        return None
+
 
 class ReplaySource:
     """Loop recorded trials as a fake live stream (no hardware needed).
@@ -86,14 +112,18 @@ class ReplaySource:
     def __enter__(self):
         from gnn import recordings
         trials = recordings.load_labeled(
-            self.root, expected_channels=self.expected_channels)
+            self.root, expected_channels=self.expected_channels, full=True)
         if self.labels:
             trials = [t for t in trials if t["label"] in self.labels]
         if not trials:
             raise RuntimeError(f"no trials under {self.root}")
         self._sf = trials[0]["sf"]
-        joined = np.concatenate([t["data"] for t in trials], axis=1)
+        self._names = trials[0]["full_names"]
+        joined = np.concatenate([t["full_data"] for t in trials], axis=1)
         self._stream = np.ascontiguousarray(joined)
+        eeg_rows = [self._names.index(c) for c in trials[0]["channels"]]
+        self._eeg_rows = eeg_rows
+        self._eeg_names = list(trials[0]["channels"])
         cap = int(self._sf * 10)
         self._buf = np.zeros((self._stream.shape[0], 0))
         self._cap = cap
@@ -143,7 +173,40 @@ class ReplaySource:
             if self._buf.shape[1] < want:
                 return None
             window = self._buf[:, -want:].copy()
-        return np.ascontiguousarray(window, dtype=np.float64)
+        if channels:
+            rows = [self._names.index(c) for c in channels]
+        else:
+            rows = self._eeg_rows
+        return np.ascontiguousarray(window[rows, :], dtype=np.float64)
+
+    def _latest(self, name):
+        with self._lock:
+            if self._buf.shape[1] == 0 or name not in self._names:
+                return None
+            return float(self._buf[self._names.index(name), -1])
+
+    def read_battery(self):
+        """Latest Battery value in percent (None when absent)."""
+        value = self._latest("Battery")
+        return None if value is None else int(round(value))
+
+    def read_accel(self):
+        """Latest (x, y, z) accelerometer sample in m/s2 (None if absent)."""
+        xyz = tuple(self._latest(c)
+                    for c in ("Accel_x", "Accel_y", "Accel_z"))
+        return None if any(v is None for v in xyz) else xyz
+
+    def read_contacts(self, channels=None):
+        """Latest contact_* values as {channel: value} (None if absent)."""
+        channels = list(channels or self._eeg_names)
+        out = {}
+        for ch in channels:
+            for candidate in (f"contact_{ch}", f"contact{ch}", ch):
+                value = self._latest(candidate)
+                if value is not None:
+                    out[ch] = value
+                    break
+        return out or None
 
 
 def list_devices():

@@ -48,11 +48,13 @@ def find_trials(root="EEG_recordings"):
     return sorted(trials)
 
 
-def load_trial(path, expected_channels=None, expected_fs=250):
+def load_trial(path, expected_channels=None, expected_fs=250, full=False):
     """Load one trial -> dict(data (n_eeg, T) float64, sf, channels, ...).
 
     Opens read-only; warns when -wal/-shm sidecars are missing (the signal
-    usually lives in the WAL) or timestamps show gaps.
+    usually lives in the WAL) or timestamps show gaps. With full=True the
+    dict also carries the complete channel set (contact/accel/misc) as
+    ``full_data`` (n_all, T) plus ``full_names``/``full_types`` lists.
     """
     base = os.path.splitext(path)[0]
     for ext in ("-wal", "-shm"):
@@ -99,25 +101,33 @@ def load_trial(path, expected_channels=None, expected_fs=250):
     data = np.concatenate(picked, axis=1)
     chunk_samples = [c.shape[1] for c in picked]
     time = np.concatenate(times)
+    full_data = (np.ascontiguousarray(np.concatenate(chunks, axis=1))
+                 if full else None)
     gaps = np.diff(time)
     step = 1.0 / float(sf)
     if len(gaps) and (gaps.max() > 3 * step or gaps.min() <= 0):
         warnings.warn(f"{path}: timestamp gaps detected "
                       f"(min={gaps.min():.4f}s max={gaps.max():.4f}s)")
-    return {"data": np.ascontiguousarray(data), "sf": float(sf),
-            "channels": want, "time": time, "path": path,
-            "n_chunks": len(chunks), "chunk_samples": chunk_samples}
+    out = {"data": np.ascontiguousarray(data), "sf": float(sf),
+           "channels": want, "time": time, "path": path,
+           "n_chunks": len(chunks), "chunk_samples": chunk_samples}
+    if full:
+        out["full_data"] = full_data
+        out["full_names"] = [n.strip() for n in names]
+        out["full_types"] = [t.strip() for t in types]
+    return out
 
 
 def load_labeled(root="EEG_recordings", expected_channels=None,
-                 expected_fs=250):
+                 expected_fs=250, full=False):
     """Load all trials -> list of dicts with label + trial_id.
 
     trial_id (relative db path) groups windows for trial-wise splits.
+    full=True also loads contact/accel/misc channels (for dashboards).
     """
     out = []
     for label, path in find_trials(root):
-        trial = load_trial(path, expected_channels, expected_fs)
+        trial = load_trial(path, expected_channels, expected_fs, full=full)
         trial["label"] = label
         trial["trial_id"] = os.path.relpath(path, root)
         out.append(trial)
