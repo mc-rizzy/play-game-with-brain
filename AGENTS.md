@@ -18,3 +18,4 @@
 
 - Single package-style imports (`from game.x import ...`); run via `-m` or `game/main.py` bootstrap.
 - `game/ai_input.json` (live AI input, gitignored) merges with keyboard input; see `game/ai_input.example.json`.
+- P toggles the silent rule-based autopilot (`game/autopilot.py`), which replaces GNN input while on; no in-game text mentions it by design.

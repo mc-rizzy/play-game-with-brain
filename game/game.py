@@ -20,6 +20,7 @@ from game.lighting import Lighting
 from game.entities import Player, Enemy, move_collide
 from game.utils import lerp_col, sky_and_daylight
 from game import ai_control
+from game.autopilot import Autopilot
 
 
 class Game:
@@ -63,6 +64,8 @@ class Game:
         self._heart_cache = {}
         self._prev_ai_buttons = {"attack": False, "place": False,
                                  "torch": False, "craft": False}
+        self.autopilot = Autopilot()
+        self.autopilot_on = False  # P toggles; silent by design
 
         spawn_x = WORLD_W // 2
         self.spawn = (
@@ -333,7 +336,10 @@ class Game:
         )
         kb_jump = bool(keys[pygame.K_SPACE] or keys[pygame.K_w])
         try:
-            ai = ai_control.poll_ai_action()
+            if self.autopilot_on:
+                ai = self.autopilot.action(self, dt)
+            else:
+                ai = ai_control.poll_ai_action()
         except Exception:
             ai = {"move": 0.0, "jump": False, "attack": False,
                   "place": False, "torch": False, "craft": False,
@@ -1395,6 +1401,9 @@ class Game:
 
                 elif event.key == pygame.K_f:
                     self.quick_torch()
+
+                elif event.key == pygame.K_p:
+                    self.autopilot_on = not self.autopilot_on
 
                 elif event.key == pygame.K_c:
                     self.run_calibration_wizard()
