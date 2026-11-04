@@ -74,8 +74,11 @@ high latency, unstable training. Instead:
    log-power + relative power (8 node features @ 2 Hz, streaming filters).
    Train this path with `gnn/train.py --fast`.
 2. **Spatial GNN Layer** (`gnn/graph.py`): nodes = cap electrodes,
-   edges = spatial proximity blended with per-frame functional
-   connectivity (Pearson correlation) -> spatial-temporal latent vector.
+   edges = spatial proximity (+ learned affinities) blended with
+   per-frame functional connectivity (Pearson correlation) ->
+   spatial-temporal latent vector. Functional edges engage after wizard
+   adaptation tunes the head with them, so inference always matches
+   what the head was trained on.
 3. **Meta-model Layer** (`gnn/adapt.py` + `game/calibrate.py`): the 15 s
    Calibration Wizard collects a labeled support set and fine-tunes the
    head only (MAML-style inner loop) — the game instantly understands

@@ -90,19 +90,42 @@ class LiveSource:
         return None
 
 
+def interleave_trials(trials):
+    """Round-robin trials across labels (deterministic, sorted labels).
+
+    Replay then cycles UP/DOWN/LEFT/... like a live session instead of
+    sitting on one command for minutes, so dashboards and demos show
+    genuinely changing predictions.
+    """
+    groups = {}
+    for trial in trials:
+        groups.setdefault(trial["label"], []).append(trial)
+    queues = [list(groups[key]) for key in sorted(groups)]
+    ordered = []
+    while any(queues):
+        for queue in queues:
+            if queue:
+                ordered.append(queue.pop(0))
+    return ordered
+
+
 class ReplaySource:
     """Loop recorded trials as a fake live stream (no hardware needed).
 
     Streams chunks in real time (``realtime=True``) or as fast as consumed.
+    Trials replay round-robin across labels (``interleave=True``) so the
+    stream cycles commands; pass ``interleave=False`` for label-grouped
+    (sorted) order.
     """
 
     def __init__(self, root="EEG_recordings", labels=None, realtime=True,
-                 chunk_s=0.1, expected_channels=None):
+                 chunk_s=0.1, expected_channels=None, interleave=True):
         self.root = root
         self.labels = [l.lower() for l in labels] if labels else None
         self.realtime = realtime
         self.chunk_s = chunk_s
         self.expected_channels = expected_channels
+        self.interleave = interleave
         self._lock = threading.Lock()
         self._buf = None  # (C, T) ring of streamed samples
         self._sf = 250
@@ -115,6 +138,8 @@ class ReplaySource:
             self.root, expected_channels=self.expected_channels, full=True)
         if self.labels:
             trials = [t for t in trials if t["label"] in self.labels]
+        if self.interleave:
+            trials = interleave_trials(trials)
         if not trials:
             raise RuntimeError(f"no trials under {self.root}")
         self._sf = trials[0]["sf"]

@@ -304,8 +304,11 @@ class Dashboard:
         inner = self._panel(rect, "prediction")
         best = int(np.argmax(self.smooth))
         gated = self.smooth[best] >= CONFIDENCE
-        cmd = self.classes[best] if (gated and self.model is not None) else "-"
-        colour = (140, 255, 170) if gated else (120, 130, 150)
+        if self.model is None:
+            cmd, colour = "NO MODEL", (255, 200, 120)
+        else:
+            cmd = self.classes[best] if gated else "-"
+            colour = (140, 255, 170) if gated else (120, 130, 150)
         txt = self.big.render(f"{cmd}  {self.smooth[best]:.2f}", True, colour)
         self.screen.blit(txt, (inner.x + 4, inner.y + 2))
         y = inner.y + 44
@@ -451,6 +454,8 @@ def main(argv=None):
                     help="start fullscreen (F11 toggles at runtime)")
     ap.add_argument("--size", default="1440x900",
                     help="windowed size WxH (clamped to fit the display)")
+    ap.add_argument("--no-interleave", action="store_true",
+                    help="replay trials grouped by label instead of cycling")
     ap.add_argument("--frames", type=int, default=None,
                     help="quit after N frames (headless smoke)")
     args = ap.parse_args(argv)
@@ -465,8 +470,11 @@ def main(argv=None):
         model, cfg = load_checkpoint(args.model)
         classes = cfg["classes"]
         print(f"Loaded {args.model} (val_acc={cfg['best_val_acc']})")
+    else:
+        print("NOTE: no --model given, prediction panel shows NO MODEL.")
     if args.source == "replay":
-        source = ReplaySource(args.data, expected_channels=CHANNELS)
+        source = ReplaySource(args.data, expected_channels=CHANNELS,
+                              interleave=not args.no_interleave)
     else:
         if not args.device:
             raise SystemExit("--device required for live source")

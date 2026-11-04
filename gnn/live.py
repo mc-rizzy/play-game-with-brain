@@ -64,7 +64,8 @@ class BrainBridge:
 
     def __init__(self, model, classes=None, ema=EMA, confidence=CONFIDENCE,
                  cooldown_s=COOLDOWN_S, step_s=STEP_S, mains=50,
-                 muse_client=None, muse_cooldown_s=10.0, context_fn=None):
+                 muse_client=None, muse_cooldown_s=10.0, context_fn=None,
+                 dynamic=False):
         self.model = model
         self.classes = classes or CLASSES
         self.ema = ema
@@ -75,6 +76,10 @@ class BrainBridge:
         self.muse = muse_client
         self.muse_cooldown_s = muse_cooldown_s
         self.context_fn = context_fn
+        # Dynamic (functional-connectivity) edges only help when the head
+        # was tuned with them (wizard adapter); the base checkpoint
+        # trained on static+learned edges, so inference must match it.
+        self.dynamic = bool(dynamic)
         self.smooth = np.ones(len(self.classes)) / len(self.classes)
         self.cooldown_left = 0.0
         self.prev_command = None
@@ -86,7 +91,7 @@ class BrainBridge:
         clean = preprocess(window, mains=self.mains)
         feats = extract_node_features(clean, mains=self.mains)
         A_func = None
-        if hasattr(self.model, "func_weight"):  # SpatialGNN: dynamic edges
+        if self.dynamic and hasattr(self.model, "func_weight"):
             from gnn.graph import functional_adj
             A_func = functional_adj(clean)
         return self.step_features(feats, A_func=A_func)
@@ -96,7 +101,8 @@ class BrainBridge:
         import torch
         x = torch.tensor(np.asarray(feats, dtype=np.float32)[None])
         with torch.no_grad():
-            if A_func is not None and hasattr(self.model, "func_weight"):
+            if (self.dynamic and A_func is not None
+                    and hasattr(self.model, "func_weight")):
                 a = torch.tensor(np.asarray(A_func, dtype=np.float32)[None])
                 logits = self.model(x, A_func=a)
             else:
@@ -168,6 +174,8 @@ def main(argv=None):
     ap.add_argument("--mains", type=int, default=50)
     ap.add_argument("--muse-fallback", action="store_true",
                     help="Muse referees gray-zone frames (Meta Model API)")
+    ap.add_argument("--no-interleave", action="store_true",
+                    help="replay trials grouped by label instead of cycling")
     ap.add_argument("--steps", type=int, default=None,
                     help="stop after N windows (replay smoke)")
     ap.add_argument("--quiet", action="store_true")
@@ -183,6 +191,7 @@ def main(argv=None):
         print(f"WARNING: checkpoint channels {cfg['channels']} != {CHANNELS}")
 
     ema, confidence, cooldown_s = EMA, CONFIDENCE, COOLDOWN_S
+    dynamic = False
     if args.adapter:
         from gnn.adapt import apply_adapter, load_adapter
         adapter = load_adapter(args.adapter)
@@ -191,8 +200,12 @@ def main(argv=None):
         ema = float(gates.get("ema", ema))
         confidence = float(gates.get("confidence", confidence))
         cooldown_s = float(gates.get("cooldown_s", cooldown_s))
+        dynamic = bool(adapter.get("calibration", {}).get(
+            "adapt", {}).get("dynamic_edges", False))
         print(f"Adapter {args.adapter}: personalized head + "
               f"gates(ema={ema:.2f} conf={confidence:.2f} cd={cooldown_s:.2f}s)")
+    print(f"Graph edges: static+learned"
+          f"{'+functional (adapter-tuned)' if dynamic else ''}")
 
     muse_client = None
     if args.muse_fallback:
@@ -212,7 +225,8 @@ def main(argv=None):
         print("Feature layer: 2 s windows -> 12-dim node feats")
 
     if args.source == "replay":
-        source = ReplaySource(args.data, expected_channels=CHANNELS)
+        source = ReplaySource(args.data, expected_channels=CHANNELS,
+                              interleave=not args.no_interleave)
     else:
         if not args.device:
             raise SystemExit("--device required for live source")
@@ -220,7 +234,8 @@ def main(argv=None):
 
     bridge = BrainBridge(model, cfg["classes"], ema=ema,
                          confidence=confidence, cooldown_s=cooldown_s,
-                         mains=args.mains, muse_client=muse_client)
+                         mains=args.mains, muse_client=muse_client,
+                         dynamic=dynamic)
     window_n = int(WINDOW_S * FS)
     print(f"Bridge live -> {GAME_INPUT} "
           f"(window={WINDOW_S}s step={STEP_S}s gate={confidence:.2f})")

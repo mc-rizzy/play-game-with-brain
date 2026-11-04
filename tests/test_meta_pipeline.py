@@ -248,6 +248,58 @@ class TestVizFastModel(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_ML, "numpy/torch not installed")
+class TestReplayOrder(unittest.TestCase):
+    def test_roundrobin_cycles_labels(self):
+        from gnn.source import interleave_trials
+        trials = [{"label": lab} for lab in
+                  ["left"] * 3 + ["right"] * 2 + ["up"]]
+        ordered = [t["label"] for t in interleave_trials(trials)]
+        self.assertEqual(ordered, ["left", "right", "up",
+                                  "left", "right", "left"])
+
+
+@unittest.skipUnless(HAVE_ML, "numpy/torch not installed")
+class TestGameHookup(unittest.TestCase):
+    def test_file_command_drives_game(self):
+        try:
+            import pygame
+        except ImportError:
+            self.skipTest("pygame not installed")
+        os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+        os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
+        import pygame
+        from game import ai_control
+        from game.game import Game
+        from gnn.live import reset_game_input, write_game_input
+
+        real_set_mode = pygame.display.set_mode
+        pygame.display.set_mode = lambda *a, **k: real_set_mode((1280, 720))
+        try:
+            game = Game()
+        finally:
+            pygame.display.set_mode = real_set_mode
+        try:
+            ai_control.clear_action()
+            reset_game_input()
+            # Held RIGHT via the bridge's file route moves the player.
+            write_game_input(move=1.0)
+            x0 = game.player.rect.x
+            for _ in range(30):
+                game.update(1 / 60.0)
+            self.assertGreater(game.player.rect.x, x0,
+                               "ai_input.json move=+1 should push right")
+            # INTERACT edge-triggers a sword swing.
+            write_game_input(attack=True)
+            game.update(1 / 60.0)
+            self.assertGreater(game.player.swing, 0.0,
+                               "ai_input.json attack should swing the sword")
+        finally:
+            reset_game_input()
+            ai_control.clear_action()
+            pygame.quit()
+
+
+@unittest.skipUnless(HAVE_ML, "numpy/torch not installed")
 class TestVizLayout(unittest.TestCase):
     def _headless(self):
         try:
@@ -510,6 +562,19 @@ class TestLiveBridgeMeta(unittest.TestCase):
                              cooldown_s=0.0)
         self.assertIsInstance(bridge.model, SpatialGNN)
         cmd, probs = bridge.step(np.random.RandomState(0).randn(8, 500))
+        self.assertIn(cmd, ("UP", "DOWN", "LEFT", "RIGHT", "INTERACT"))
+        self.assertEqual(len(probs), 5)
+
+    def test_dynamic_edges_opt_in(self):
+        from gnn.graph import as_spatial
+        from gnn.live import BrainBridge
+        from gnn.model import EEGGraphNet
+        torch.manual_seed(0)
+        static = BrainBridge(as_spatial(EEGGraphNet()))
+        self.assertFalse(static.dynamic)  # base ckpt trained static-only
+        dyn = BrainBridge(as_spatial(EEGGraphNet()), confidence=0.0,
+                          cooldown_s=0.0, dynamic=True)
+        cmd, probs = dyn.step(np.random.RandomState(0).randn(8, 500))
         self.assertIn(cmd, ("UP", "DOWN", "LEFT", "RIGHT", "INTERACT"))
         self.assertEqual(len(probs), 5)
 
