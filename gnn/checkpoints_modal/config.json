@@ -1,0 +1,36 @@
+{
+  "channels": [
+    "F3",
+    "F4",
+    "C3",
+    "C4",
+    "P3",
+    "P4",
+    "O1",
+    "O2"
+  ],
+  "classes": [
+    "UP",
+    "DOWN",
+    "LEFT",
+    "RIGHT",
+    "INTERACT"
+  ],
+  "fs": 250,
+  "fin": 12,
+  "hidden": 32,
+  "mains": 50,
+  "window_s": 2.0,
+  "step_s": 0.25,
+  "best_val_acc": 0.8027681708335876,
+  "n_trials": 151,
+  "labels": [
+    "down",
+    "interact",
+    "left",
+    "right",
+    "up"
+  ],
+  "fast": false,
+  "backend": "modal"
+}

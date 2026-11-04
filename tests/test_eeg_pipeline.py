@@ -269,6 +269,19 @@ class TestModalTrain(unittest.TestCase):
         self.assertEqual(F_va.shape[1:], (8, 12))
         self.assertEqual(meta["labels"], ["left", "right"])
         self.assertEqual(meta["n_trials"], 4)
+        self.assertEqual(meta["fin"], 12)
+
+    def test_prepare_payload_fast_shapes(self):
+        mt = self._import_with_fake_modal()
+        rng = np.random.RandomState(0)
+        trials = [{"label": lab, "path": f"t{i}", "trial_id": f"t{i}",
+                   "data": rng.randn(8, 1000)}
+                  for i, lab in enumerate(["left"] * 2 + ["right"] * 2)]
+        F_tr, y_tr, F_va, y_va, meta = mt.prepare_payload(trials, fast=True)
+        self.assertEqual(F_tr.shape[1:], (8, 8))
+        self.assertEqual(F_va.shape[1:], (8, 8))
+        self.assertEqual(meta["fin"], 8)
+        self.assertTrue(meta["fast"])
 
     def test_dotenv_auth(self):
         import tempfile
@@ -327,7 +340,12 @@ class TestModalTrain(unittest.TestCase):
         self.assertIn("state_dict", result)
         self.assertIn("best_val_acc", result)
         self.assertEqual(result["n_classes"], 5)
+        self.assertEqual(result["fin"], 12)
         self.assertEqual(len(result["history"]), 1)
+        F8 = rng.randn(16, 8, 8).astype(np.float32)
+        result8 = mt.fit_remote(F8, y_tr, F8[:4], y_tr[:4],
+                                hidden=8, epochs=1, batch=8, fin=8)
+        self.assertEqual(result8["fin"], 8)
 
 
 @unittest.skipUnless(HAVE_ML, "numpy/torch not installed")

@@ -20,7 +20,7 @@ Run (from the workspace root, Windows)::
     .venv/Scripts/modal run gnn/modal_train.py --data EEG_recordings --out gnn/checkpoints
 
 Options mirror ``gnn/train.py`` (``--epochs --batch --lr --mains
---window-s --step-s --hidden --seed``). To use a GPU worker instead of CPU::
+--window-s --step-s --hidden --fast --seed``). To use a GPU worker instead of CPU::
 
     set MODAL_GPU=T4 && .venv/Scripts/modal run gnn/modal_train.py ...
 
@@ -102,23 +102,30 @@ image = (
 
 
 def prepare_payload(trials, window_s=2.0, step_s=0.25, mains=50,
-                    val_fraction=0.2, seed=0):
+                    val_fraction=0.2, seed=0, fast=False):
     """trials -> (F_tr, y_tr, F_va, y_va, meta). Modal-free, unit-tested."""
     import numpy as np
 
     from gnn.dataset import build_dataset, trial_split
-    from gnn.model import FS, extract_node_features
+    from gnn.features import N_FAST_FEATURES
+    from gnn.model import FS, N_FEATURES
+    from gnn.train import featurize, featurize_fast
 
     labels = sorted({t["label"] for t in trials})
     if len(labels) < 2:
         raise SystemExit("Need trials from at least 2 commands to train.")
     X, y, tids = build_dataset(trials, window_s, step_s, FS)
     tr, va = trial_split(tids, y, val_fraction, seed)
-    F = np.stack([extract_node_features(ep, fs=FS, mains=mains) for ep in X])
-    F = F.astype(np.float32)
+    if fast:
+        F = featurize_fast(X, mains)
+        fin = N_FAST_FEATURES
+    else:
+        F = featurize(X, mains)
+        fin = N_FEATURES
+    F = np.asarray(F, dtype=np.float32)
     meta = {"labels": labels, "n_trials": len(trials),
             "n_windows": len(X), "window_s": window_s, "step_s": step_s,
-            "mains": mains,
+            "mains": mains, "fin": fin, "fast": fast,
             "train_trials": sorted(set(tids[tr].tolist())),
             "val_trials": sorted(set(tids[va].tolist()))}
     return F[tr], y[tr], F[va], y[va], meta
@@ -127,16 +134,16 @@ def prepare_payload(trials, window_s=2.0, step_s=0.25, mains=50,
 @app.function(image=image, timeout=1800,
               gpu=os.environ.get("MODAL_GPU") or None)
 def fit_remote(F_tr, y_tr, F_va, y_va, hidden=32, epochs=120, batch=16,
-               lr=1e-3, seed=0):
+               lr=1e-3, seed=0, fin=12):
     """Fit on a Modal worker. Returns weights + history (pickled)."""
     import sys
 
     sys.path.insert(0, "/root")
     import torch
-    from gnn.model import CHANNELS, CLASSES, N_FEATURES, EEGGraphNet, train
+    from gnn.model import CHANNELS, CLASSES, EEGGraphNet, train
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = EEGGraphNet(channels=CHANNELS, fin=N_FEATURES, hidden=hidden,
+    model = EEGGraphNet(channels=CHANNELS, fin=fin, hidden=hidden,
                         n_classes=len(CLASSES)).to(device)
     history, best = train(model, F_tr, y_tr, F_va, y_va, epochs=epochs,
                           batch=batch, lr=lr, seed=seed)
@@ -144,13 +151,17 @@ def fit_remote(F_tr, y_tr, F_va, y_va, hidden=32, epochs=120, batch=16,
     return {"state_dict": {k: v.cpu() for k, v in model.state_dict().items()},
             "history": history, "best_val_acc": best,
             "channels": CHANNELS, "classes": CLASSES, "n_classes": n_out,
-            "fin": N_FEATURES, "fs": 250, "hidden": hidden}
+            "fin": fin, "fs": 250, "hidden": hidden}
 
 
 @app.local_entrypoint()
-def main(data="EEG_recordings", out="gnn/checkpoints", epochs=120, batch=16,
-         lr=1e-3, mains=50, window_s=2.0, step_s=0.25, hidden=32,
-         val_fraction=0.2, seed=0):
+def main(data: str = "EEG_recordings", out: str = "gnn/checkpoints",
+         epochs: int = 120, batch: int = 16, lr: float = 1e-3,
+         mains: int = 50, window_s: float = 2.0, step_s: float = 0.25,
+         hidden: int = 32, val_fraction: float = 0.2, seed: int = 0,
+         fast: bool = False):
+    """Cloud entrypoint (annotations required: `modal run` parses CLI args
+    from them; untyped params would arrive as strings)."""
     import json
 
     import torch
@@ -163,11 +174,13 @@ def main(data="EEG_recordings", out="gnn/checkpoints", epochs=120, batch=16,
                                      expected_fs=FS)
     print(f"Loaded {len(trials)} trials locally, featurizing...")
     F_tr, y_tr, F_va, y_va, meta = prepare_payload(
-        trials, window_s, step_s, mains, val_fraction, seed)
-    print(f"Windows: train={len(F_tr)} val={len(F_va)}; "
+        trials, window_s, step_s, mains, val_fraction, seed, fast=fast)
+    print(f"Windows: train={len(F_tr)} val={len(F_va)} "
+          f"(fin={meta['fin']}, fast={fast}); "
           f"sending {F_tr.nbytes + F_va.nbytes} bytes to Modal...")
     result = fit_remote.remote(F_tr, y_tr, F_va, y_va, hidden=hidden,
-                               epochs=epochs, batch=batch, lr=lr, seed=seed)
+                               epochs=epochs, batch=batch, lr=lr, seed=seed,
+                               fin=meta["fin"])
     os.makedirs(out, exist_ok=True)
     torch.save({k: result[k] for k in (
         "state_dict", "channels", "classes", "n_classes", "fin", "fs",
@@ -179,5 +192,5 @@ def main(data="EEG_recordings", out="gnn/checkpoints", epochs=120, batch=16,
                    "window_s": window_s, "step_s": step_s,
                    "best_val_acc": result["best_val_acc"],
                    "n_trials": meta["n_trials"], "labels": meta["labels"],
-                   "backend": "modal"}, fh, indent=2)
+                   "fast": fast, "backend": "modal"}, fh, indent=2)
     print(f"Best val acc: {result['best_val_acc']:.3f} -> {out}/")
