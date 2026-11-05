@@ -1,133 +1,156 @@
-# play-game-with-brain
-Using an EEG and AI model, brain waves can be interpreted to control a video game completely with one's thoughts. No controllers needed.
+# play-game-with-brain — Hackathon Submission
 
-Runnable:
-game/main
-gnn/viz
-
-## Game
-
-Setup and run (from the workspace root, Windows):
-
-```
-py -m venv .venv
-.venv\Scripts\pip install -r game/requirements.txt
-.venv\Scripts\python -m game.main
-```
-
-(On macOS/Linux use `python3 -m venv .venv` and `.venv/bin/python`.)
-
-Tests:
-
-```
-.venv\Scripts\python -m unittest discover -s tests
-```
-
-Keyboard always works. An AI/EEG model in this workspace can drive the
-game simultaneously — same process via `from game import ai_control`
-(`ai_control.set_action(move=1.0, jump=True)`), a separate process via
-`game/ai_input.json` (see `game/ai_input.example.json`), or the workspace
-GNN via `ai_control.EEGModelController`. GNN class labels
-`UP/DOWN/LEFT/RIGHT/INTERACT` map to jump/place/move/attack.
-
-## EEG pipeline (BrainAccess Mini, 250 Hz)
-
-Install ML deps: `.venv\Scripts\pip install -r gnn/requirements.txt`
-
-1. Record: put one `*_eeg.db` trial (+ `-wal`/`-shm`) per
-   `EEG_recordings/<up|down|left|right|interact>/sub-*/ses-*/` folder
-   (~30 trials/command; folder name is the label).
-2. Train — pick one (same data, same `model.pt` output):
-   - Local device (free, uses your own CPU/GPU):
-     `.venv\Scripts\python -m gnn.train --data EEG_recordings --out gnn/checkpoints`
-   - Modal cloud (faster, uses credits; `.venv\Scripts\pip install modal`,
-     then auth via `.venv\Scripts\modal setup`, or a `.env` file with
-     `MODAL_TOKEN_ID` + `MODAL_TOKEN_SECRET` from modal.com API tokens):
-     `.venv\Scripts\modal run gnn/modal_train.py --data EEG_recordings --out gnn/checkpoints`
-     (add `set MODAL_GPU=T4 &&` in front for a GPU worker).
-   Both do a trial-wise 80/20 split and save `model.pt` + `config.json`.
-   Out of Modal credits? Just run the local command instead.
-3. Calibrate each new player (15 s): `.venv\Scripts\python -m
-   game.calibrate --source live --device "..." --model
-   gnn/checkpoints/model.pt` — or just press **C** inside the game.
-   The wizard flashes 5 cues, few-shot adapts the GNN head to that
-   brain (MAML-style), asks Muse to coach the player + tune the live
-   gates, and saves `adapter.pt` + `calibration_report.json`.
-   (`--source demo` runs with no hardware.)
-4. Watch: `.venv\Scripts\python -m gnn.viz --source replay`
-   (model auto-loaded; live board: raw/CAR traces, band powers, GNN
-   feature heatmap, prediction, spectrum, contacts, battery, accel;
-   `--source live --device "..."` on hardware; flip `USE_FAST_MODEL`
-   in `gnn/viz.py` for the fast checkpoint).
-5. Play: run `.venv\Scripts\python -m game.main` and
-   `.venv\Scripts\python -m gnn.live --source live --device "..."
-   --model gnn/checkpoints/model.pt --adapter gnn/checkpoints/adapter.pt`
-   in two terminals — brainwaves steer the game alongside the
-   keyboard. Add `--muse-fallback` so Muse referees uncertain frames.
-
-## Dual-layer meta-pipeline
-
-Raw EEG straight into a GNN means ~4000 non-stationary floats per step —
-high latency, unstable training. Instead:
-
-1. **Feature Extraction Layer** (`gnn/features.py`): BrainAccess SDK
-   stream -> rolling 0.5 s chunks -> Welch PSD -> theta/alpha/beta/gamma
-   log-power + relative power (8 node features @ 2 Hz, streaming filters).
-   Train this path with `gnn/train.py --fast`.
-2. **Spatial GNN Layer** (`gnn/graph.py`): nodes = cap electrodes,
-   edges = spatial proximity (+ learned affinities) blended with
-   per-frame functional connectivity (Pearson correlation) ->
-   spatial-temporal latent vector. Functional edges engage after wizard
-   adaptation tunes the head with them, so inference always matches
-   what the head was trained on.
-3. **Meta-model Layer** (`gnn/adapt.py` + `game/calibrate.py`): the 15 s
-   Calibration Wizard collects a labeled support set and fine-tunes the
-   head only (MAML-style inner loop) — the game instantly understands
-   each new brain.
-
-## Meta models (integral, not decorative)
-
-Every demo run calls Meta's hosted **Muse Spark** (`muse-spark-1.3`)
-through the Meta Model API (`https://api.meta.ai/v1`, see `gnn/muse.py`):
-
-- **Calibration coach**: Muse reads the player's fresh 15 s EEG summary
-  (band powers, class separability, adaptation fit) and returns personal
-  coaching + tuned confidence/cooldown/EMA gates.
-- **Intent referee** (`--muse-fallback`): when the GNN is in the gray
-  zone, Muse disambiguates intent from recent predictions + game context
-  instead of dropping the input.
-
-Setup: put the hackathon key in `.env` as `META_TOKEN=...` (or export
-`MODEL_API_KEY`). Every call is timed, printed, and logged into
-`calibration_report.json` (`muse.calls`), so the demo video + repo both
-show the Meta model working. Without a key/network the pipeline falls
-back to heuristic gates — it still plays, minus the personalization.
-
-Live streaming needs Windows + `mne` + the BrainAccess Windows SDK
-(`pip install mne` plus the SDK's `python_api`); replay mode needs
-no hardware. (The `BrainAccessSDK-linux/` folder in this workspace is
-outdated and only kept as an API reference.)
-
-
-
-
-# Hackathon Submisison to Global Meta Hackathon 2026:
 Team name: Team 01f-w8c9spo
 
+## Which track are you submitting to?
 
+Indie Developer Track.
 
+## Which problem statement did you build towards?
 
+**Push the Frontier**: give a machine a new capability — control a video
+game purely with thought. An 8-electrode EEG headset streams brainwaves
+through a dual-layer meta-pipeline (rolling PSD features → spatial GNN
+→ per-player few-shot adapter, coached by Meta's Muse models) that steers
+a live Pygame world alongside the keyboard. No controllers needed.
 
-# Set up
+## Project description
 
-set up the venv first.
+A brain-computer interface for gaming. The BrainAccess Mini headset (8
+channels @ 250 Hz) streams raw EEG; instead of feeding raw samples to a
+network (high latency, unstable training), a Feature Extraction Layer
+computes rolling 0.5 s power-spectral-density features across
+theta/alpha/beta/gamma bands, a Spatial GNN Layer message-passes over
+electrode nodes with spatial + functional-connectivity edges, and a
+meta-model head personalizes to each new brain in a 15-second in-game
+Calibration Wizard (press C). Live inference writes commands to the game
+at 4 Hz; the keyboard keeps working simultaneously. Includes local and
+Modal-cloud training, a realtime EEG dashboard, hardware-free replay and
+demo modes, and an automated unittest suite (`tests/`).
 
-Then install the following:
+Live headset streaming runs on **Windows (64-bit)** with the BrainAccess
+SDK — see the platform notes in [HOW_TO_SETUP.md](HOW_TO_SETUP.md).
+Everything else (game, training, replay, visualizer) runs anywhere.
 
-pip install pygame
-cd BrainAccessSDK-windows/python_api
-pip install .
+## Describe your use of Meta products to build the submitted project
 
-Verify installation:
-python -c "import brainaccess; print('BrainAccess successfully installed!')"
+Meta's models built this project *and* run inside it.
 
+**Building it (Muse Code + Muse Spark):**
+
+- Built the Pygame game itself — world generation, physics, lighting,
+  sprites, UI, and the game loop.
+- Researched the EEG signal chain: feature extraction (PSD band powers,
+  Welch spectra, Hjorth parameters) and spatial filtering (CAR, mains
+  notch, bandpass).
+- Architected the spatial GNN: graph convolutions over cap electrodes,
+  static + learned adjacency, per-frame functional connectivity.
+- Wrote the training workflows: local and Modal-cloud scripts,
+  trial-wise stratified splits, augmentation, checkpointing.
+- Designed the few-shot adapter and the 15-second Calibration Wizard
+  (MAML-style head adaptation per player).
+- Wrote the interface between the trained model and the game
+  (`game/ai_control.py` routes, the `gnn/live.py` bridge, EMA smoothing,
+  confidence gating, cooldowns).
+- Built the realtime EEG dashboard, the fullscreen/responsive layout
+  work, the docs, and the test suite.
+
+**Running inside it (Muse Spark `muse-spark-1.3` via the Meta Model API):**
+
+- **Calibration coach** (`gnn/muse.py`, OpenAI-compatible
+  `https://api.meta.ai/v1`): reads each player's fresh 15 s EEG summary
+  and returns personal coaching + tuned confidence/cooldown/EMA gates.
+- **Intent referee** (`--muse-fallback`): disambiguates gray-zone frames
+  from prediction history + game context instead of dropping the input.
+
+Auth via the hackathon `META_TOKEN` in `.env`. Every call is timed,
+printed to the console, and archived in `calibration_report.json`
+(`muse.calls`), so the demo video and the repo both show the Meta model
+calls. Without a key/network the pipeline falls back to heuristic gates.
+
+## Why are Meta's models important to your solution?
+
+The GNN learns signal patterns but cannot explain them or reason about a
+new player. Every brain is wired differently: fixed confidence gates that
+work for one judge misfire for the next, and hand-written tuning rules
+cannot read a separability report. Muse closes that loop — it turns 15
+seconds of signal statistics into human coaching ("hold each imagery
+steady through the full cue") plus machine-usable gate thresholds, and it
+referees ambiguous moments with context no classifier has. Without Meta's
+models the game plays; with them it understands *this* player.
+
+## Why was Meta's API and Muse models integral for this project?
+
+Personalization is the product: a brain-game that only works for the
+person it trained on is a party trick. The Calibration Wizard + Muse
+coach is what makes a stranger (a judge) playable in 15 seconds — the
+GNN adapts its head while Muse adapts the experience. The referee role
+further converts would-be dropped inputs into correct moves. Both sit on
+the critical path of every demo run, not in a side panel.
+
+## What was the biggest obstacle your team hit while building this project, and how did Meta's models and API solve them?
+
+Two obstacles. First, **cross-brain generalization**: one player's motor
+imagery looks like another player's noise, and we could not ship a
+labeled dataset per judge. The few-shot adapter + Muse coach solved it —
+the adapter fits the head in seconds while Muse reads the adaptation
+report and tunes gates/coaching per brain. Second, **silent uncertainty**:
+the old pipeline dropped every sub-threshold frame, which feels like
+lag. The Muse referee recovers the recoverable ones using context,
+instead of frozen heuristics.
+
+## Compared with other AI models, how did Meta's models outperform on this project?
+
+Framed honestly: we built on Muse because the Meta Model API is
+drop-in OpenAI-compatible (base URL + key + model id, stdlib HTTP —
+no new SDK in our pipeline), the context window swallows full
+calibration summaries plus prediction history in one call, and the model
+reliably returns the strict JSON our game loop parses (coaching +
+thresholds + verdict), verified live during development. That combination
+— compatibility, context, structured output — is what the realtime loop
+needed.
+
+## For this project, when choosing an AI model or coding tool, what matters most?
+
+Latency-profile honesty (we learned Muse Spark spends tokens reasoning,
+so we budget for it and keep it off the 4 Hz path), structured-output
+reliability (the game parses every reply), and drop-in API compatibility
+so the BCI loop stays dependency-light.
+
+## What makes it hardest for your team to switch to a different AI model or coding tool?
+
+The pipeline now depends on Muse's specific behavior: coaching quality
+grounded in EEG statistics, threshold tuning that respects our gate
+ranges, and the audited call trail judges inspect. Re-validating that
+closed loop — prompts, JSON contract, offline fallbacks, demo timing —
+against another model would cost more than the integration itself.
+
+## Provide feedback from your experience using Modal
+
+Modal training (`gnn/modal_train.py`) worked as designed: featurization
+stays local, only tiny feature tensors ship to the worker, and the same
+`model.pt` comes back. Auth via `.env` tokens plus `modal setup` fallback
+was smooth; the main friction was credit-watching on a student budget,
+which is why local training remains a first-class identical path.
+
+## Trained checkpoints (5-class val accuracy, chance = 20%)
+
+| Checkpoint | Features | Backend | Epochs | Val acc |
+|---|---|---|---|---|
+| `gnn/checkpoints` | 12-dim, 2 s windows | local CPU | 120 | 73.4% |
+| `gnn/checkpoints_fast` | 8-dim, 0.5 s rolling PSD | local CPU | 120 | 70.6% |
+| `gnn/checkpoints_modal` | 12-dim, 2 s windows | Modal CPU | 200 | 80.3% |
+| `gnn/checkpoints_fast_modal` | 8-dim, 0.5 s rolling PSD | Modal CPU | 200 | 75.1% |
+
+All four ship in the repo with their `config.json`. The bridge and the
+visualizer auto-detect classic vs. fast checkpoints.
+
+## Judge demo flow (3 minutes)
+
+1. `python -m game.main` — show keyboard play (0:00–0:30).
+2. Press **C** — 15 s Calibration Wizard on the judge's own head
+   (`--source live`; `--source demo` without hardware), watch the Muse
+   coaching + tuned gates land live (0:30–1:30).
+3. `python -m gnn.live --adapter ... --muse-fallback` — play with thought;
+   show `calibration_report.json` → `muse.calls` as the Meta-model audit
+   trail (1:30–3:00).

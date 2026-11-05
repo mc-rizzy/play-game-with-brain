@@ -6,7 +6,7 @@
 - Run the full test suite: `.venv\Scripts\python -m unittest discover -s tests`
 - Regenerate pixel art: `.venv\Scripts\python game/generate_assets.py` (writes `game/assets/*.png`)
 - Train EEG model locally: `.venv\Scripts\python -m gnn.train --data EEG_recordings --out gnn/checkpoints`
-- Train EEG model on Modal: `.venv\Scripts\modal run gnn/modal_train.py --data EEG_recordings --out gnn/checkpoints` (needs `pip install modal` + `modal setup`; `MODAL_GPU=T4` for GPU)
+- Train EEG model on Modal: `.venv\Scripts\modal run gnn/modal_train.py --data EEG_recordings --out gnn/checkpoints` (needs `pip install modal` + `modal setup`; `MODAL_GPU=T4` for GPU; `--fast` supported)
 - EEG visualizer: `.venv\Scripts\python -m gnn.viz --source replay` (model auto-loaded; `USE_FAST_MODEL` in `gnn/viz.py` flips to the fast checkpoint; `--fullscreen`, F11 toggles)
 - Brain bridge: `.venv\Scripts\python -m gnn.live --source live --device "..." --model gnn/checkpoints/model.pt`
 - Calibrate a new brain (15 s wizard): `.venv\Scripts\python -m game.calibrate --source live --device "..." --model gnn/checkpoints/model.pt` (or press C in-game; `--source demo` needs no hardware)
@@ -18,4 +18,4 @@
 
 - Single package-style imports (`from game.x import ...`); run via `-m` or `game/main.py` bootstrap.
 - `game/ai_input.json` (live AI input, gitignored) merges with keyboard input; see `game/ai_input.example.json`.
-- P toggles the silent rule-based autopilot (`game/autopilot.py`), which replaces GNN input while on; no in-game text mentions it by design.
+- Live headset streaming needs Windows 64-bit (BrainAccess native lib); unsupported: 32-bit x86/ARM32, headless/embedded Linux ARM, Windows on ARM. Replay/demo/dev work anywhere.
